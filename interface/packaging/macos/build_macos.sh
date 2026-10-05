@@ -6,6 +6,7 @@
 # sur un Mac (ou sur les machines macOS de GitHub Actions, voir .github/workflows/macos.yml).
 # Prérequis : Python 3.10+ (python.org ou Homebrew). Utilisation : ./packaging/macos/build_macos.sh
 set -euo pipefail
+set -x   # affiche chaque commande dans le journal (diagnostic)
 cd "$(dirname "$0")/../.."          # dossier interface/
 
 PY="${PYBIN:-python3}"
@@ -43,6 +44,14 @@ DMG="dist/PubMedSearch-$VERSION-macOS-$ARCH.dmg"
 STAGE=$(mktemp -d)
 cp -R "$APP" "$STAGE/"
 ln -s /Applications "$STAGE/Applications"
-hdiutil create -volname "PubMed Search $VERSION" -srcfolder "$STAGE" -ov -format UDZO "$DMG"
+# hdiutil échoue parfois (« Resource busy ») sur les machines de GitHub : jusqu'à 5 essais.
+ok=0
+for i in 1 2 3 4 5; do
+  if hdiutil create -volname "PubMed Search $VERSION" -srcfolder "$STAGE" -ov -format UDZO "$DMG"; then
+    ok=1; break
+  fi
+  echo "hdiutil : essai $i échoué, nouvel essai dans 10 s…"; sleep 10
+done
+[ "$ok" = 1 ] || { echo "Impossible de créer l'image disque"; exit 1; }
 rm -rf "$STAGE"
 echo "Terminé : $DMG ($(du -h "$DMG" | cut -f1))"
