@@ -1,0 +1,59 @@
+# Construit les images disque macOS (Apple Silicon et Intel) et les ajoute à la Release.
+# Se déclenche à chaque envoi qui modifie interface/ ou script/, ou à la main :
+# onglet Actions → « Construire macOS » → Run workflow.
+name: Construire macOS
+
+on:
+  push:
+    branches: [main]
+    paths: ["interface/**", "script/**", ".github/workflows/macos.yml"]
+  workflow_dispatch:
+
+env:
+  TAG: v1.2.0
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15         # Apple Silicon (arm64)
+            arch: AppleSilicon
+          - runner: macos-15-intel   # Intel (x86_64)
+            arch: Intel
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        working-directory: interface
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Construire l'application et le .dmg
+        run: bash packaging/macos/build_macos.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ matrix.arch }}
+          path: interface/dist/*.dmg
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dmg
+          merge-multiple: true
+      - name: Ajouter les .dmg à la Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd dmg
+          sha256sum *.dmg > SHA256SUMS-macOS.txt
+          cat SHA256SUMS-macOS.txt
+          gh release upload "$TAG" *.dmg SHA256SUMS-macOS.txt --clobber --repo "$GITHUB_REPOSITORY"

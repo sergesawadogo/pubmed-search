@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
 # Publie ce dossier sur GitHub : crée le dépôt public (s'il n'existe pas), pousse le code et
 # la notice, puis crée la Release avec les installateurs du dossier release/.
+# Les versions macOS (.dmg) ne peuvent pas être construites ici : l'envoi du code déclenche
+# leur construction sur les Mac de GitHub (fichier .github/workflows/macos.yml), qui les
+# ajoute à la Release une quinzaine de minutes plus tard.
 #
-# Prérequis : git, curl, python3 ; un jeton GitHub « classic » avec la portée public_repo
-#   (github.com → Settings → Developer settings → Personal access tokens → Tokens (classic)).
+# Prérequis : git, curl, python3 ; un jeton GitHub « classic » avec les portées
+#   public_repo ET workflow (github.com → Settings → Developer settings →
+#   Personal access tokens → Tokens (classic) → Generate new token (classic)).
+#   Sans « workflow », GitHub refuse l'envoi du fichier qui construit la version macOS.
 # Utilisation :  ./publier_github.sh            (le jeton est demandé, il n'est pas affiché)
 #                GITHUB_TOKEN=xxx ./publier_github.sh
 set -euo pipefail
@@ -29,9 +34,16 @@ done
 echo "Vérification des empreintes…"
 (cd release && sha256sum -c --quiet SHA256SUMS.txt) || { echo "Empreintes incorrectes : fichier abîmé ou d'une autre version."; exit 1; }
 
+# Fichier de construction macOS : copie de référence dans interface/packaging/macos/
+WF=.github/workflows/macos.yml
+WFSRC=interface/packaging/macos/github-workflow-macos.yml
+if [ -f "$WFSRC" ] && ! cmp -s "$WFSRC" "$WF" 2>/dev/null; then
+  mkdir -p .github/workflows && cp "$WFSRC" "$WF"
+fi
+
 TOKEN="${GITHUB_TOKEN:-}"
 if [ -z "$TOKEN" ]; then
-  read -rsp "Jeton GitHub (public_repo) : " TOKEN; echo
+  read -rsp "Jeton GitHub (public_repo + workflow) : " TOKEN; echo
 fi
 AUTH=(-H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28")
 json() { python3 -c "import sys,json; d=json.load(sys.stdin); print(d$1 if isinstance(d,dict) else '')" 2>/dev/null || true; }
@@ -39,6 +51,15 @@ json() { python3 -c "import sys,json; d=json.load(sys.stdin); print(d$1 if isins
 LOGIN=$(curl -fsS "${AUTH[@]}" "$API/user" | json "['login']") || true
 [ -n "$LOGIN" ] || { echo "Jeton refusé par GitHub."; exit 1; }
 [ "$LOGIN" = "$OWNER" ] || { echo "Ce jeton appartient à « $LOGIN », pas à « $OWNER »."; exit 1; }
+SCOPES=$(curl -sS -o /dev/null -D - "${AUTH[@]}" "$API/user" | tr -d '\r' |
+         awk -F': ' 'tolower($1)=="x-oauth-scopes"{print $2}')
+if [ -n "$SCOPES" ]; then
+  case ", $SCOPES," in
+    *", workflow,"*) ;;
+    *) echo "Ce jeton n'a pas la portée « workflow » (portées : $SCOPES)."
+       echo "Créez un jeton classic en cochant public_repo ET workflow, puis relancez."; exit 1 ;;
+  esac
+fi
 
 # 1. Dépôt public
 CODE=$(curl -s -o /dev/null -w '%{http_code}' "${AUTH[@]}" "$API/repos/$OWNER/$REPO")
@@ -74,11 +95,19 @@ if [ -z "$RID" ]; then
   BODY=$(python3 -c "import json,sys; print(json.dumps({'tag_name':'$TAG','target_commitish':'main','name':'$TITLE','body':open('$NOTES',encoding='utf-8').read(),'make_latest':'true'}))")
   REL=$(curl -fsS "${AUTH[@]}" -X POST "$API/repos/$OWNER/$REPO/releases" -d "$BODY")
   RID=$(echo "$REL" | json "['id']")
+else
+  echo "Mise à jour du texte de la Release $TAG…"
+  BODY=$(python3 -c "import json; print(json.dumps({'name':'$TITLE','body':open('$NOTES',encoding='utf-8').read()}))")
+  curl -fsS "${AUTH[@]}" -X PATCH "$API/repos/$OWNER/$REPO/releases/$RID" -d "$BODY" >/dev/null
 fi
+LIST=$(curl -s "${AUTH[@]}" "$API/repos/$OWNER/$REPO/releases/$RID/assets?per_page=100")
 for f in "${ASSETS[@]}"; do
   name=$(basename "$f")
-  OLD=$(curl -s "${AUTH[@]}" "$API/repos/$OWNER/$REPO/releases/$RID/assets" |
-        python3 -c "import sys,json; print(next((a['id'] for a in json.load(sys.stdin) if a['name']=='$name'),''))")
+  size=$(wc -c < "$f" | tr -d ' ')
+  read -r OLD OLDSIZE < <(echo "$LIST" | python3 -c "import sys,json; a=next((a for a in json.load(sys.stdin) if a['name']=='$name'),None); print(a['id'], a['size']) if a else print('', '')")
+  if [ -n "$OLD" ] && [ "$OLDSIZE" = "$size" ]; then
+    echo "$name : déjà en ligne, identique (taille) — conservé."; continue
+  fi
   [ -n "$OLD" ] && curl -fsS "${AUTH[@]}" -X DELETE "$API/repos/$OWNER/$REPO/releases/assets/$OLD" >/dev/null
   echo "Envoi de $name…"
   curl -fsS "${AUTH[@]}" -H "Content-Type: application/octet-stream" --data-binary @"$f" \
@@ -92,3 +121,9 @@ echo "  Téléchargements          : https://github.com/$OWNER/$REPO/releases/la
 for f in "${ASSETS[@]}"; do
   echo "  $(basename "$f") : https://github.com/$OWNER/$REPO/releases/download/$TAG/$(basename "$f")"
 done
+echo
+echo "Version macOS : construction en cours sur GitHub (10 à 20 minutes). Suivi :"
+echo "  https://github.com/$OWNER/$REPO/actions"
+echo "Les fichiers PubMedSearch-${TAG#v}-macOS-AppleSilicon.dmg et …-Intel.dmg apparaîtront"
+echo "ensuite sur la page des téléchargements. En cas d'échec (croix rouge), envoyez-moi le"
+echo "journal de l'étape en erreur."

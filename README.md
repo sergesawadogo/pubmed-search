@@ -1,8 +1,8 @@
 # PubMed Search
 
 Rechercher dans PubMed et télécharger automatiquement les PDF des articles en libre accès,
-avec un tableau Excel récapitulatif. Application de bureau pour **Windows 10 / 11** et
-**Linux (Ubuntu, Debian, Mint)**, avec une extension **Firefox** qui envoie une recherche
+avec un tableau Excel récapitulatif. Application de bureau pour **Windows 10 / 11**,
+**macOS 12+ (Apple Silicon et Intel)** et **Linux (Ubuntu, Debian, Mint)**, avec une extension **Firefox** qui envoie une recherche
 PubMed vers l'application en un clic.
 
 ![Fenêtre principale](docs/captures/recherche.png)
@@ -14,9 +14,11 @@ Page des téléchargements : **[Dernière version](https://github.com/sergesawad
 | Fichier | Pour |
 |---|---|
 | `PubMedSearch-Setup-1.2.0.exe` | Windows 10 et 11 (64 bits) |
+| `PubMedSearch-1.2.0-macOS-AppleSilicon.dmg` | Mac à puce Apple (M1, M2, M3, M4…), macOS 12 Monterey ou plus récent |
+| `PubMedSearch-1.2.0-macOS-Intel.dmg` | Mac à processeur Intel, macOS 12 Monterey ou plus récent |
 | `pubmed-search-gui_1.2.0_amd64.deb` | Ubuntu 20.04+, Debian 10+, Linux Mint 20+ (64 bits) |
 | `envoyer-vers-pubmed-search-1.0.0.xpi` | Extension Firefox (facultative) |
-| `SHA256SUMS.txt` | Empreintes pour vérifier les fichiers |
+| `SHA256SUMS.txt`, `SHA256SUMS-macOS.txt` | Empreintes pour vérifier les fichiers |
 
 Rien d'autre à installer : Python et ses bibliothèques sont inclus dans l'application.
 
@@ -34,6 +36,24 @@ Rien d'autre à installer : Python et ses bibliothèques sont inclus dans l'appl
 
 Désinstallation : Paramètres → Applications → PubMed Search → Désinstaller.
 Vos réglages (`%LOCALAPPDATA%\pubmed-search-gui`) sont conservés.
+
+### macOS (Apple Silicon ou Intel)
+
+1. Quel fichier ? Menu  → **À propos de ce Mac** : « Puce Apple M… » → fichier
+   `…-AppleSilicon.dmg` ; « Processeur Intel… » → fichier `…-Intel.dmg`.
+2. Ouvrez le `.dmg` et glissez **PubMed Search** sur le dossier **Applications**.
+3. Premier lancement : l'application n'est pas signée par un certificat Apple ni notariée,
+   macOS la bloque (« Apple ne peut pas vérifier… »). Cliquez sur **OK**, puis ouvrez
+   **Réglages Système → Confidentialité et sécurité**, descendez jusqu'au message concernant
+   PubMed Search et cliquez sur **Ouvrir quand même** (mot de passe demandé). Les fois
+   suivantes, elle s'ouvre normalement.
+   Alternative dans le Terminal :
+   `xattr -dr com.apple.quarantine "/Applications/PubMed Search.app"`
+4. Les liens `pubmedsearch://` de l'extension Firefox fonctionnent une fois l'application
+   lancée au moins une fois depuis le dossier Applications.
+
+Désinstallation : glissez **PubMed Search** du dossier Applications vers la Corbeille.
+Vos réglages (`~/Library/Preferences/pubmed-search-gui`) sont conservés.
 
 ### Linux (Ubuntu, Debian, Linux Mint)
 

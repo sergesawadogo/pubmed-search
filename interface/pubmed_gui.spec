@@ -4,7 +4,10 @@
 import os, sys
 ONEFILE = os.environ.get("PUBMED_ONEFILE") == "1"
 WIN = sys.platform.startswith("win")
-NAME = "PubMedSearch" if WIN else "pubmed-search-gui"
+MAC = sys.platform == "darwin"
+NAME = "PubMedSearch" if (WIN or MAC) else "pubmed-search-gui"
+sys.path.insert(0, os.path.join(os.getcwd(), "packaging"))
+from version import VERSION  # noqa: E402
 
 a = Analysis(
     ["pubmed_gui.py"],
@@ -45,12 +48,36 @@ if sys.platform.startswith("linux"):
 a.datas = [d for d in a.datas if keep(d)]
 if not WIN:
     a.datas = [d for d in a.datas if not d[0].replace("\\", "/").endswith(("icon.ico", "IBMPlexMono-500.ttf"))]
+if not MAC:
+    a.datas = [d for d in a.datas if not d[0].replace("\\", "/").endswith("icon.icns")]
 pyz = PYZ(a.pure)
-icon = "resources/icon.ico" if WIN else None
+icon = "resources/icon.ico" if WIN else ("resources/icon.icns" if MAC else None)
+STRIP = sys.platform.startswith("linux")   # macOS : ne pas toucher aux signatures ad hoc
 if ONEFILE:
     exe = EXE(pyz, a.scripts, a.binaries, a.datas, [], name=NAME, console=False, icon=icon,
               upx=False, runtime_tmpdir=None)
 else:
     exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name=NAME, console=False, icon=icon, upx=False,
-              strip=not WIN)
-    coll = COLLECT(exe, a.binaries, a.datas, name=NAME, upx=False, strip=not WIN)
+              strip=STRIP, argv_emulation=False)
+    coll = COLLECT(exe, a.binaries, a.datas, name=NAME, upx=False, strip=STRIP)
+    if MAC:
+        app = BUNDLE(
+            coll,
+            name="PubMed Search.app",
+            icon=icon,
+            bundle_identifier="io.github.sergesawadogo.pubmedsearch",
+            version=VERSION,
+            info_plist={
+                "CFBundleName": "PubMed Search",
+                "CFBundleDisplayName": "PubMed Search",
+                "CFBundleShortVersionString": VERSION,
+                "CFBundleVersion": VERSION,
+                "LSMinimumSystemVersion": "12.0",
+                "NSHighResolutionCapable": True,
+                "LSApplicationCategoryType": "public.app-category.education",
+                "CFBundleURLTypes": [{
+                    "CFBundleURLName": "io.github.sergesawadogo.pubmedsearch",
+                    "CFBundleURLSchemes": ["pubmedsearch"],
+                }],
+            },
+        )

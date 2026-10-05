@@ -1,6 +1,7 @@
 ## PubMed Search 1.2.0
 
 **Nouveautés**
+- Version macOS (Apple Silicon et Intel), avec prise en charge des liens `pubmedsearch://`.
 - Extension Firefox « Envoyer vers PubMed Search » : bouton sur pubmed.ncbi.nlm.nih.gov,
   filtres de PubMed convertis en requête, menu contextuel sur une sélection.
 - L'application reçoit les liens `pubmedsearch://` et ne s'ouvre qu'une fois (une demande
@@ -13,8 +14,12 @@
   Informations complémentaires → Exécuter quand même).
 - `pubmed-search-gui_1.2.0_amd64.deb` : Ubuntu 20.04+, Debian 10+, Linux Mint 20+
   (`sudo apt install ./pubmed-search-gui_1.2.0_amd64.deb`).
+- `PubMedSearch-1.2.0-macOS-AppleSilicon.dmg` et `PubMedSearch-1.2.0-macOS-Intel.dmg` :
+  macOS 12+ (non signés ni notariés : au premier lancement, Réglages Système →
+  Confidentialité et sécurité → Ouvrir quand même). Construits par GitHub Actions ; ils
+  apparaissent ici une quinzaine de minutes après la publication.
 - `envoyer-vers-pubmed-search-1.0.0.xpi` : extension Firefox non signée (installation
   temporaire via about:debugging, ou permanente sur Developer Edition / Nightly / ESR).
-- `SHA256SUMS.txt` : empreintes SHA-256.
+- `SHA256SUMS.txt` (Windows, Linux, Firefox) et `SHA256SUMS-macOS.txt` : empreintes SHA-256.
 
 Notice complète : voir le README du dépôt.

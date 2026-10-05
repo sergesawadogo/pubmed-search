@@ -1,4 +1,8 @@
-"""Affiche APP_VERSION de pubmed_gui.py (utilisé par les scripts de construction)."""
-import os, re
-src = open(os.path.join(os.path.dirname(__file__), "..", "pubmed_gui.py"), encoding="utf-8").read()
-print(re.search(r'APP_VERSION = "([^"]+)"', src).group(1))
+"""Version de l'application (lue dans pubmed_gui.py) ; exécuté seul, l'affiche."""
+import os
+import re
+_src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "pubmed_gui.py"),
+            encoding="utf-8").read()
+VERSION = re.search(r'APP_VERSION = "([^"]+)"', _src).group(1)
+if __name__ == "__main__":
+    print(VERSION)

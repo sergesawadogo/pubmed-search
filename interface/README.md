@@ -10,10 +10,15 @@ avec le Python intégré à l'application. Rien d'autre à installer pour l'util
 |---|---|---|
 | Ubuntu / Debian | `pubmed-search-gui_1.2.0_amd64.deb` | `sudo apt install ./pubmed-search-gui_1.2.0_amd64.deb` |
 | Windows 10 / 11 (64 bits) | `PubMedSearch-Setup-1.2.0.exe` | double-clic (droits administrateur) |
+| macOS 12+ Apple Silicon (M1…M4) | `PubMedSearch-1.2.0-macOS-AppleSilicon.dmg` | ouvrir le .dmg, glisser l'app dans Applications |
+| macOS 12+ Intel | `PubMedSearch-1.2.0-macOS-Intel.dmg` | idem |
 
 L'installateur Windows n'est pas signé numériquement : au premier lancement, Windows
 SmartScreen affiche « Windows a protégé votre ordinateur » → *Informations complémentaires*
 → *Exécuter quand même*. Désinstallation : Paramètres → Applications → PubMed Search.
+
+L'application macOS n'est ni signée avec un certificat Apple ni notariée : au premier
+lancement, Réglages Système → Confidentialité et sécurité → *Ouvrir quand même*.
 
 Le .deb embarque un Python « portable » (python-build-standalone) et n'emporte pas les
 bibliothèques système de la machine de construction : il demande seulement glibc ≥ 2.28
@@ -46,7 +51,8 @@ Les clés API sont passées au script par variables d'environnement (`NCBI_API_K
 `CORE_API_KEY`, `ELSEVIER_API_KEY`, `OPENALEX_API_KEY`) : elles n'apparaissent ni dans le
 journal ni dans error.txt. Si vous cochez « Mémoriser », elles sont écrites en clair dans
 le fichier de réglages (`~/.config/pubmed-search-gui/settings.json`, ou
-`%LOCALAPPDATA%\pubmed-search-gui\settings.json` sous Windows).
+`%LOCALAPPDATA%\pubmed-search-gui\settings.json` sous Windows,
+`~/Library/Preferences/pubmed-search-gui/settings.json` sous macOS).
 
 ## Faire évoluer le script
 
@@ -74,9 +80,15 @@ double-clic sur `packaging\windows\build_windows.bat` →
 `dist\portable\PubMedSearch.exe` et, si [Inno Setup 6](https://jrsoftware.org/isdl.php)
 est installé, `dist\PubMedSearch-Setup-<version>.exe`.
 
-**GitHub Actions** : poussez ce dossier dans un dépôt GitHub, puis onglet *Actions* →
-« Construire les paquets » → *Run workflow* (ou poussez une étiquette `v1.0.0`).
-Les paquets .deb et .exe sont dans les *artifacts* de l'exécution.
+**macOS (.dmg)**, sur un Mac avec Python 3.10+ : `./packaging/macos/build_macos.sh` →
+`dist/PubMedSearch-<version>-macOS-AppleSilicon.dmg` ou `…-Intel.dmg` selon le processeur
+du Mac (PyInstaller ne construit que pour la machine sur laquelle il tourne, et pas pour
+macOS depuis Linux ou Windows).
+
+**GitHub Actions (macOS)** : le fichier `.github/workflows/macos.yml` du dépôt construit les
+deux .dmg sur les machines macOS de GitHub (`macos-15` pour Apple Silicon, `macos-15-intel`
+pour Intel) à chaque envoi qui modifie `interface/` ou `script/`, puis les ajoute à la
+Release. Lancement manuel : onglet *Actions* → « Construire macOS » → *Run workflow*.
 
 ## Développement
 

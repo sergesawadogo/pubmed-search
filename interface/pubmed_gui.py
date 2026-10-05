@@ -95,7 +95,7 @@ if len(sys.argv) >= 3 and sys.argv[1] == "--run-script":
 # --------------------------------------------------------------------------- #
 from PySide6.QtCore import (Qt, QDateTime, QProcess, QProcessEnvironment,  # noqa: E402
                             QStandardPaths, QTimer, QUrl, Signal, QCoreApplication,
-                            QLockFile, QFileSystemWatcher)
+                            QLockFile, QFileSystemWatcher, QEvent, QObject)
 from PySide6.QtGui import (QColor, QDesktopServices, QFont, QFontDatabase,  # noqa: E402
                            QIcon, QPainter, QPainterPath, QSyntaxHighlighter,
                            QTextCharFormat, QTextCursor)
@@ -1978,6 +1978,27 @@ def parse_request(url):
     return req
 
 
+class MacUrlFilter(QObject):
+    """macOS : les liens pubmedsearch:// arrivent par un événement « ouvrir l'URL » de
+    l'application (Apple Event), pas par la ligne de commande."""
+
+    def __init__(self):
+        super().__init__()
+        self.win = None
+        self.pending = []
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.FileOpen:
+            url = event.url().toString()
+            if url.lower().startswith(URL_SCHEME + ":"):
+                if self.win is not None:
+                    self.win.handle_url(url)
+                else:
+                    self.pending.append(url)
+                return True
+        return False
+
+
 def main():
     QCoreApplication.setApplicationName(APP_ID)
     QCoreApplication.setOrganizationName("")
@@ -2000,6 +2021,8 @@ def main():
         except Exception:  # noqa
             pass
     app = QApplication(sys.argv)
+    url_filter = MacUrlFilter()
+    app.installEventFilter(url_filter)
     app.setApplicationName(APP_ID)
     app.setApplicationDisplayName(APP_NAME)
     app.setOrganizationName("")
@@ -2011,6 +2034,8 @@ def main():
     app.setStyleSheet(stylesheet(ui, mono))
     win = MainWindow()
     win.show()
+    url_filter.win = win
+    urls += url_filter.pending
     for u in urls:
         QTimer.singleShot(300, lambda u=u: win.handle_url(u))
     code = app.exec()
