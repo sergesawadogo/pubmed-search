@@ -1,0 +1,72 @@
+{
+  "_aide": "Filtres de l'interface PubMed Search. Plusieurs cases d'un même groupe sont combinées par OR, les groupes entre eux et avec la requête par AND. Modifiez les libellés et les requêtes librement (syntaxe PubMed), puis redémarrez l'application.",
+  "groupes": [
+    {
+      "titre": "Régions cibles",
+      "elements": [
+        {
+          "label": "Mondial",
+          "query": "world[tiab] OR mondial[tiab] OR global[tiab]"
+        },
+        {
+          "label": "Afrique de l'Ouest",
+          "query": "Benin[tiab] OR \"Porto-Novo\"[tiab] OR Cotonou[tiab] OR \"Burkina Faso\"[tiab] OR Ouagadougou[tiab] OR \"Bobo Dioulasso\"[tiab] OR \"Cabo Verde\"[tiab] OR Praia[tiab] OR Mindelo[tiab] OR \"Ivory Coast\"[tiab] OR Abidjan[tiab] OR Yamoussoukro[tiab] OR Gambia[tiab] OR Banjul[tiab] OR Brikama[tiab] OR Ghana[tiab] OR Accra[tiab] OR Kumasi[tiab] OR Guinea[tiab] OR Conakry[tiab] OR Nzerekore[tiab] OR \"Guinea-Bissau\"[tiab] OR Bissau[tiab] OR Bafata[tiab] OR Liberia[tiab] OR Monrovia[tiab] OR Gbarnga[tiab] OR Mali[tiab] OR Bamako[tiab] OR Sikasso[tiab] OR Mauritania[tiab] OR Nouakchott[tiab] OR Nouadhibou[tiab] OR Niger[tiab] OR Niamey[tiab] OR Zinder[tiab] OR Nigeria[tiab] OR Lagos[tiab] OR Abuja[tiab] OR Senegal[tiab] OR Dakar[tiab] OR Touba[tiab] OR \"Sierra Leone\"[tiab] OR Freetown[tiab] OR Kenema[tiab] OR Togo[tiab] OR Lome[tiab] OR Sokode[tiab]"
+        },
+        {
+          "label": "Afrique du Nord",
+          "query": "Algeria[tiab] OR Algiers[tiab] OR Oran[tiab] OR Egypt[tiab] OR Cairo[tiab] OR Alexandria[tiab] OR Libya[tiab] OR Tripoli[tiab] OR Benghazi[tiab] OR Morocco[tiab] OR Rabat[tiab] OR Casablanca[tiab] OR Sudan[tiab] OR Khartoum[tiab] OR Omdurman[tiab] OR Tunisia[tiab] OR Tunis[tiab] OR Sfax[tiab]"
+        },
+        {
+          "label": "Afrique de l'Est",
+          "query": "Burundi[tiab] OR Bujumbura[tiab] OR Gitega[tiab] OR Comoros[tiab] OR Moroni[tiab] OR Moutsamoudou[tiab] OR Djibouti[tiab] OR \"Djibouti City\"[tiab] OR \"Ali Sabieh\"[tiab] OR Eritrea[tiab] OR Asmara[tiab] OR Keren[tiab] OR Ethiopia[tiab] OR \"Addis Ababa\"[tiab] OR \"Dire Dawa\"[tiab] OR Kenya[tiab] OR Nairobi[tiab] OR Mombasa[tiab] OR Madagascar[tiab] OR Antananarivo[tiab] OR Toamasina[tiab] OR Malawi[tiab] OR Lilongwe[tiab] OR Blantyre[tiab] OR Mauritius[tiab] OR \"Port Louis\"[tiab] OR \"Beau Bassin-Rose Hill\"[tiab] OR Mozambique[tiab] OR Maputo[tiab] OR Matola[tiab] OR Rwanda[tiab] OR Kigali[tiab] OR Butare[tiab] OR Seychelles[tiab] OR Victoria[tiab] OR \"Anse Boileau\"[tiab] OR Somalia[tiab] OR Mogadishu[tiab] OR Hargeisa[tiab] OR \"South Sudan\"[tiab] OR Juba[tiab] OR Malakal[tiab] OR Uganda[tiab] OR Kampala[tiab] OR Gulu[tiab] OR Tanzania[tiab] OR Dodoma[tiab] OR \"Dar es Salaam\"[tiab] OR Zambia[tiab] OR Lusaka[tiab] OR Kitwe[tiab] OR Zimbabwe[tiab] OR Harare[tiab] OR Bulawayo[tiab]"
+        },
+        {
+          "label": "Afrique Centrale",
+          "query": "Angola[tiab] OR Luanda[tiab] OR Huambo[tiab] OR Cameroon[tiab] OR Yaounde[tiab] OR Douala[tiab] OR \"Central African Republic\"[tiab] OR Bangui[tiab] OR Bimbo[tiab] OR Chad[tiab] OR \"N'Djamena\"[tiab] OR Moundou[tiab] OR \"Republic of the Congo\"[tiab] OR Brazzaville[tiab] OR \"Pointe-Noire\"[tiab] OR \"Democratic Republic of the Congo\"[tiab] OR Kinshasa[tiab] OR Lubumbashi[tiab] OR \"Equatorial Guinea\"[tiab] OR Malabo[tiab] OR Bata[tiab] OR Gabon[tiab] OR Libreville[tiab] OR \"Port-Gentil\"[tiab] OR \"Sao Tome and Principe\"[tiab] OR \"Sao Tome\"[tiab] OR \"Santo Antonio\"[tiab]"
+        },
+        {
+          "label": "Afrique Australe",
+          "query": "\"South Africa\"[tiab] OR Pretoria[tiab] OR \"Cape Town\"[tiab] OR Namibia[tiab] OR Windhoek[tiab] OR Rundu[tiab] OR Botswana[tiab] OR Gaborone[tiab] OR Francistown[tiab] OR Eswatini[tiab] OR Mbabane[tiab] OR Manzini[tiab] OR Lesotho[tiab] OR Maseru[tiab] OR Teyateyaneng[tiab]"
+        }
+      ]
+    },
+    {
+      "titre": "Niveau de développement",
+      "elements": [
+        {
+          "label": "Fortement industrialisé",
+          "query": "\"high income countr*\"[tiab]"
+        },
+        {
+          "label": "Industrialisé",
+          "query": "\"middle income countr*\"[tiab]"
+        },
+        {
+          "label": "Faiblement industrialisé",
+          "query": "\"low income countr*\"[tiab]"
+        }
+      ]
+    },
+    {
+      "titre": "Type d'articles",
+      "elements": [
+        {
+          "label": "Méta-analyses",
+          "query": "meta-analysis[pt]"
+        },
+        {
+          "label": "Revues de la littérature",
+          "query": "review[pt]"
+        },
+        {
+          "label": "Essais cliniques",
+          "query": "\"randomized controlled trial\"[pt] OR \"clinical trial\"[pt]"
+        },
+        {
+          "label": "Rapports de cas",
+          "query": "\"case reports\"[pt]"
+        }
+      ]
+    }
+  ]
+}

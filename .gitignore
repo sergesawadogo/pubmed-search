@@ -1,0 +1,8 @@
+release/
+build/
+build-win/
+dist/
+dist-win/
+.venv-build/
+__pycache__/
+*.pyc

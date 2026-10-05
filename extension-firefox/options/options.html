@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="fr">
+<head><meta charset="utf-8"><link rel="stylesheet" href="../popup/popup.css">
+<style>body{width:auto;max-width:520px;padding:4px 2px} main{padding:8px 4px} fieldset{border:0;padding:0;margin:0 0 10px} legend{font-weight:600;font-size:13px;margin-bottom:4px} .opt{display:flex;gap:8px;align-items:flex-start;margin:4px 0} .opt input{width:auto;margin-top:3px}</style>
+</head>
+<body>
+<main>
+  <fieldset>
+    <legend>Action du bouton sur PubMed et du menu contextuel</legend>
+    <label class="opt"><input type="radio" name="action" value="fill"> Remplir le formulaire (vous vérifiez puis lancez)</label>
+    <label class="opt"><input type="radio" name="action" value="queue"> Ajouter à la file d'attente</label>
+    <label class="opt"><input type="radio" name="action" value="run"> Lancer la recherche immédiatement</label>
+  </fieldset>
+  <fieldset>
+    <legend>Tri</legend>
+    <label class="opt"><input type="radio" name="sortMode" value="page"> Reprendre le tri choisi sur PubMed</label>
+    <label class="opt"><input type="radio" name="sortMode" value="best"> Toujours par pertinence</label>
+    <label class="opt"><input type="radio" name="sortMode" value="recent"> Toujours les plus récents</label>
+    <label class="opt"><input type="radio" name="sortMode" value="both"> Toujours les deux</label>
+  </fieldset>
+  <label for="max">Nombre maximum d'articles par tri</label>
+  <input id="max" type="number" min="1" max="10000" step="50" style="max-width:140px">
+  <p id="saved" class="hint" role="status"></p>
+  <p class="hint">Le dossier de destination, l'email et les clés API se règlent dans l'application PubMed Search.
+  La première fois, Firefox demande quelle application doit ouvrir les liens « pubmedsearch » : choisissez PubMed Search et cochez « Toujours ».</p>
+</main>
+<script src="../common.js"></script>
+<script src="options.js"></script>
+</body>
+</html>

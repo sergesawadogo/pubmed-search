@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header>
+    <img src="../icons/icon-32.png" alt="" width="20" height="20">
+    <h1>Envoyer vers PubMed Search</h1>
+  </header>
+  <main>
+    <label for="query">Requête PubMed</label>
+    <textarea id="query" rows="4" spellcheck="false" placeholder="Lancez une recherche sur pubmed.ncbi.nlm.nih.gov, ou saisissez une requête ici"></textarea>
+    <p id="note" class="hint"></p>
+    <div class="row">
+      <div>
+        <label for="sort">Tri</label>
+        <select id="sort">
+          <option value="best">Pertinence</option>
+          <option value="recent">Plus récents</option>
+          <option value="both">Les deux</option>
+        </select>
+      </div>
+      <div>
+        <label for="max">Articles max.</label>
+        <input id="max" type="number" min="1" max="10000" step="50">
+      </div>
+    </div>
+    <div class="actions">
+      <button id="fill" class="secondary" type="button">Remplir le formulaire</button>
+      <button id="queue" class="secondary" type="button">Ajouter à la file</button>
+      <button id="run" class="primary" type="button">Lancer la recherche</button>
+    </div>
+    <p id="status" class="hint" role="status"></p>
+  </main>
+  <footer>
+    <a href="#" id="options">Réglages</a>
+    <span class="hint">L'application PubMed Search doit être installée.</span>
+  </footer>
+  <script src="../common.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>

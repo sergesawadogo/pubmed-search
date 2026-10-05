@@ -1,0 +1,63 @@
+{
+  "manifest_version": 2,
+  "name": "Envoyer vers PubMed Search",
+  "version": "1.0.0",
+  "description": "Envoie la recherche PubMed affichée (avec ses filtres) vers l'application PubMed Search pour télécharger les PDF en libre accès.",
+  "author": "Serge Sawadogo",
+  "homepage_url": "https://github.com/sergesawadogo/pubmed-search",
+  "icons": {
+    "48": "icons/icon-48.png",
+    "96": "icons/icon-96.png",
+    "128": "icons/icon-128.png"
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "pubmed-search@sergesawadogo",
+      "strict_min_version": "109.0",
+      "data_collection_permissions": {
+        "required": [
+          "none"
+        ]
+      }
+    }
+  },
+  "permissions": [
+    "contextMenus",
+    "storage",
+    "activeTab",
+    "*://pubmed.ncbi.nlm.nih.gov/*"
+  ],
+  "background": {
+    "scripts": [
+      "common.js",
+      "background.js"
+    ]
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "*://pubmed.ncbi.nlm.nih.gov/*"
+      ],
+      "js": [
+        "common.js",
+        "content.js"
+      ],
+      "css": [
+        "content.css"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "browser_action": {
+    "default_title": "Envoyer vers PubMed Search",
+    "default_popup": "popup/popup.html",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png"
+    }
+  },
+  "options_ui": {
+    "page": "options/options.html",
+    "open_in_tab": false
+  }
+}
