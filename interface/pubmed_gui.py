@@ -19,7 +19,7 @@ import threading
 
 APP_NAME = "PubMed Search"
 APP_ID = "pubmed-search-gui"
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.3.0"
 
 
 # --------------------------------------------------------------------------- #
@@ -106,7 +106,8 @@ from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QDateTimeE
                                QRadioButton, QScrollArea, QSizePolicy, QSpinBox,
                                QSplitter, QTabWidget, QToolButton, QVBoxLayout,
                                QWidget, QTableWidget, QTableWidgetItem, QHeaderView,
-                               QAbstractItemView)
+                               QAbstractItemView, QColorDialog, QComboBox, QDialog,
+                               QDialogButtonBox, QTreeWidget, QTreeWidgetItem)
 
 FROZEN = getattr(sys, "frozen", False)
 BASE_DIR = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
@@ -127,6 +128,9 @@ C = {
     "log_fg": "#D9D8EA",
     "log_dim": "#8C8DA8",
     "ok": "#2E7D5B",
+    "log_pdf": "#5FD38D",    # journal : PDF obtenu (vert)
+    "log_nopdf": "#E36BD8",  # journal : sans PDF (magenta)
+    "log_json": "#5CC8E8",   # journal : JSON obtenu (cyan)
     "warn": "#B26A00",
     "err": "#B3261E",
 }
@@ -188,7 +192,7 @@ class QueryHighlighter(QSyntaxHighlighter):
 # Petits composants
 # --------------------------------------------------------------------------- #
 class ProgressStrip(QWidget):
-    """Barre segmentée : PDF obtenus (éosine) / traités sans PDF (hématoxyline) / restants."""
+    """Barre segmentée : PDF obtenus (vert) / traités sans PDF (magenta) / restants."""
 
     def __init__(self):
         super().__init__()
@@ -210,8 +214,8 @@ class ProgressStrip(QWidget):
         if self.total:
             w_ok = r.width() * self.ok / self.total
             w_miss = r.width() * self.miss / self.total
-            p.fillRect(0, 0, int(w_ok), r.height(), QColor(C["eosin"]))
-            p.fillRect(int(w_ok), 0, int(w_miss) + 1, r.height(), QColor("#6E71C4"))
+            p.fillRect(0, 0, int(w_ok), r.height(), QColor(C["log_pdf"]))
+            p.fillRect(int(w_ok), 0, int(w_miss) + 1, r.height(), QColor(C["log_nopdf"]))
         p.end()
 
 
@@ -329,18 +333,63 @@ def user_filters_path():
     return os.path.join(config_dir(), "filtres.json")
 
 
+def bundled_filters_path():
+    return os.path.join(RES, "filtres.json")
+
+
+def validate_filters(data):
+    """Vérifie la structure d'un fichier de filtres ; renvoie la liste des groupes ou lève ValueError."""
+    if not isinstance(data, dict) or not isinstance(data.get("groupes"), list):
+        raise ValueError("le fichier doit contenir une liste \"groupes\"")
+    groups = []
+    for i, g in enumerate(data["groupes"], 1):
+        if not isinstance(g, dict) or not g.get("titre") or not isinstance(g.get("elements"), list):
+            raise ValueError(f"groupe n° {i} : il faut un \"titre\" et une liste \"elements\"")
+        for j, el in enumerate(g["elements"], 1):
+            if not isinstance(el, dict) or not el.get("label"):
+                raise ValueError(f"« {g['titre']} », élément n° {j} : \"label\" manquant")
+            if not el.get("tout") and not el.get("query"):
+                raise ValueError(f"« {g['titre']} » → « {el['label']} » : \"query\" manquante")
+            q = el.get("query", "")
+            if q.count("(") != q.count(")"):
+                raise ValueError(f"« {el['label']} » : parenthèses non équilibrées")
+            if q.count('"') % 2:
+                raise ValueError(f"« {el['label']} » : guillemets non appariés")
+        if g["elements"]:
+            groups.append(g)
+    return groups
+
+
 def load_filters():
-    """Filtres de l'onglet Recherche : copie de l'utilisateur si elle existe, sinon ceux fournis."""
-    for p in (user_filters_path(), os.path.join(RES, "filtres.json")):
-        try:
-            with open(p, encoding="utf-8") as f:
-                data = json.load(f)
-            groups = [g for g in data.get("groupes", []) if g.get("titre") and g.get("elements")]
-            if groups:
-                return groups, p
-        except (OSError, ValueError):
-            continue
-    return [], ""
+    """Filtres de l'onglet Recherche : copie de l'utilisateur si elle existe (complétée par les
+    groupes ajoutés dans une version plus récente de l'application), sinon ceux fournis."""
+    bundled = []
+    try:
+        with open(bundled_filters_path(), encoding="utf-8") as f:
+            bundled = validate_filters(json.load(f))
+    except (OSError, ValueError):
+        pass
+    p = user_filters_path()
+    try:
+        with open(p, encoding="utf-8") as f:
+            data = json.load(f)
+        groups = validate_filters(data)
+        known = {g["titre"] for g in groups} | set(data.get("groupes_retires", []))
+        added = [g for g in bundled if g["titre"] not in known]
+        if added:   # nouveaux groupes fournis (ex. Burkina Faso en 1.3.0) : ajoutés à la copie
+            data["groupes"] = data["groupes"] + added
+            try:
+                with open(p + ".tmp", "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+                os.replace(p + ".tmp", p)
+            except OSError:
+                pass
+            groups += added
+        if groups:
+            return groups, p
+    except (OSError, ValueError):
+        pass
+    return bundled, bundled_filters_path() if bundled else ""
 
 
 def compose_query(base, groups):
@@ -355,6 +404,366 @@ def compose_query(base, groups):
     if len(parts) == 1:
         return parts[0]
     return " AND ".join(f"({p})" for p in parts)
+
+
+# sources optionnelles du script (--sources) : clé, libellé, info-bulle
+SOURCES = (
+    ("elsevier", "Elsevier", "API Elsevier (ScienceDirect, Cell, JBC) : PDF puis JSON. Clé requise."),
+    ("springer-oa", "Springer Nature Open Access", "Texte intégral JATS → JSON (BMC, SpringerOpen, "
+                                                   "Nature Communications…). Clé requise."),
+    ("springer-meta", "Springer Nature Meta", "Lien PDF officiel des articles Springer libres ; "
+                                              "résumé en dernier recours pour le JSON. Clé requise."),
+    ("unpaywall", "Unpaywall", "Versions libres chez l'éditeur, en dépôt ou en preprint (DOI)."),
+    ("core", "CORE", "Copies des dépôts d'universités. Clé requise ; lent (~10 requêtes/min)."),
+    ("openalex", "OpenAlex", "Liens PDF libres connus d'OpenAlex. Clé requise."),
+)
+
+
+# fonds proposés pour la zone Journal : clé -> (libellé, couleur)
+LOG_THEMES = {
+    "nuit": ("Nuit violette (défaut)", "#111222"),
+    "noir": ("Noir", "#000000"),
+    "ardoise": ("Ardoise", "#1E2329"),
+    "bleu": ("Bleu nuit", "#0B1E3A"),
+    "vert": ("Vert sombre", "#0E2A1F"),
+    "clair": ("Clair (papier)", "#FBFAF5"),
+    "blanc": ("Blanc", "#FFFFFF"),
+}
+
+
+class FilterEditor(QDialog):
+    """Éditeur des filtres intégré : volets et cases dans une liste, libellé et requête à droite.
+    Vérifie la syntaxe (parenthèses, guillemets) avant d'enregistrer la copie de l'utilisateur."""
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setWindowTitle("Modifier les filtres")
+        self.resize(980, 640)
+        self._cur = None
+        src = user_filters_path() if os.path.exists(user_filters_path()) else bundled_filters_path()
+        try:
+            with open(src, encoding="utf-8") as f:
+                self.data = json.load(f)
+        except (OSError, ValueError):
+            with open(bundled_filters_path(), encoding="utf-8") as f:
+                self.data = json.load(f)
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(18, 16, 18, 16)
+        lay.setSpacing(10)
+        lay.addWidget(hint("Chaque volet regroupe des cases ; les cases cochées d'un volet sont combinées "
+                           "par OR, les volets entre eux et avec la requête par AND. Sélectionnez un volet "
+                           "ou une case pour modifier son libellé et sa requête PubMed."))
+        body = QHBoxLayout()
+        body.setSpacing(14)
+        left = QVBoxLayout()
+        self.tree = QTreeWidget()
+        self.tree.setObjectName("filterTree")
+        self.tree.setHeaderHidden(True)
+        self.tree.setMinimumWidth(320)
+        self.tree.currentItemChanged.connect(self._select)
+        left.addWidget(self.tree, 1)
+        g1 = QGridLayout()
+        g1.setSpacing(6)
+        btns = (("Nouveau volet", self._add_group), ("Nouvelle case", self._add_element),
+                ("Monter", lambda: self._move(-1)), ("Descendre", lambda: self._move(1)),
+                ("Dupliquer", self._duplicate), ("Supprimer", self._delete))
+        for i, (t, fn) in enumerate(btns):
+            b = QPushButton(t)
+            b.setObjectName("secondary")
+            b.clicked.connect(fn)
+            g1.addWidget(b, i // 2, i % 2)
+        left.addLayout(g1)
+        body.addLayout(left, 2)
+
+        right = QVBoxLayout()
+        right.setSpacing(6)
+        self.kind_lab = section_title("")
+        right.addWidget(self.kind_lab)
+        self.name = QLineEdit()
+        self.name_lab = field_label("Libellé", self.name)
+        right.addWidget(self.name_lab)
+        right.addWidget(self.name)
+        self.is_all = QCheckBox("Case ALL : coche toutes les cases de ce volet (pas de requête propre)")
+        self.is_all.toggled.connect(self._all_toggled)
+        right.addWidget(self.is_all)
+        self.q_lab = field_label("Requête PubMed ajoutée quand la case est cochée")
+        right.addWidget(self.q_lab)
+        self.q = QPlainTextEdit()
+        self.q.setObjectName("query")
+        QueryHighlighter(self.q.document())
+        right.addWidget(self.q, 1)
+        self.q_info = hint("")
+        right.addWidget(self.q_info)
+        self.q.textChanged.connect(self._check_query)
+        body.addLayout(right, 3)
+        lay.addLayout(body, 1)
+
+        self.err = error_label()
+        lay.addWidget(self.err)
+        row = QHBoxLayout()
+        reset = QPushButton("Rétablir les filtres fournis")
+        reset.setObjectName("secondary")
+        reset.clicked.connect(self._reset)
+        ext = QPushButton("Ouvrir le fichier JSON")
+        ext.setObjectName("secondary")
+        ext.setToolTip("Édition avancée dans un éditeur de texte externe")
+        ext.clicked.connect(self._external)
+        row.addWidget(reset)
+        row.addWidget(ext)
+        row.addStretch(1)
+        bb = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        bb.button(QDialogButtonBox.Save).setText("Enregistrer")
+        bb.button(QDialogButtonBox.Save).setObjectName("primary")
+        bb.button(QDialogButtonBox.Cancel).setText("Annuler")
+        bb.button(QDialogButtonBox.Cancel).setObjectName("secondary")
+        bb.accepted.connect(self._save)
+        bb.rejected.connect(self.reject)
+        row.addWidget(bb)
+        lay.addLayout(row)
+        self._populate()
+
+    # -- arbre ---------------------------------------------------------------------- #
+    def _populate(self, select_path=None):
+        self._cur = None
+        self.tree.clear()
+        for g in self.data.get("groupes", []):
+            top = self._group_item(g)
+            for el in g.get("elements", []):
+                top.addChild(self._element_item(el))
+            top.setExpanded(True)
+        first = self.tree.topLevelItem(0)
+        if first is not None:
+            self.tree.setCurrentItem(first)
+        else:
+            self._select(None, None)
+
+    def _group_item(self, g, index=None):
+        it = QTreeWidgetItem([g.get("titre", "")])
+        f = it.font(0)
+        f.setBold(True)
+        it.setFont(0, f)
+        it.setData(0, Qt.UserRole, {"titre": g.get("titre", ""), "_group": True,
+                                    **{k: v for k, v in g.items() if k not in ("titre", "elements")}})
+        if index is None:
+            self.tree.addTopLevelItem(it)
+        else:
+            self.tree.insertTopLevelItem(index, it)
+        return it
+
+    @staticmethod
+    def _element_item(el):
+        it = QTreeWidgetItem([el.get("label", "")])
+        it.setData(0, Qt.UserRole, dict(el))
+        if el.get("tout"):
+            f = it.font(0)
+            f.setItalic(True)
+            it.setFont(0, f)
+        return it
+
+    def _store(self):
+        """Recopie le formulaire dans l'élément sélectionné."""
+        it = self._cur
+        if it is None:
+            return
+        d = dict(it.data(0, Qt.UserRole) or {})
+        name = self.name.text().strip()
+        if d.get("_group"):
+            d["titre"] = name
+        else:
+            d["label"] = name
+            if self.is_all.isChecked():
+                d["tout"] = True
+                d.pop("query", None)
+            else:
+                d.pop("tout", None)
+                d["query"] = " ".join(self.q.toPlainText().split())
+        it.setData(0, Qt.UserRole, d)
+        it.setText(0, name)
+
+    def _select(self, cur, _prev=None):
+        self._store()
+        self._cur = cur
+        d = cur.data(0, Qt.UserRole) if cur is not None else None
+        on = d is not None
+        for w in (self.name, self.name_lab):
+            w.setEnabled(on)
+        if not on:
+            self.kind_lab.setText("Aucun élément")
+            self.name.clear()
+            for w in (self.is_all, self.q_lab, self.q, self.q_info):
+                w.hide()
+            return
+        group = bool(d.get("_group"))
+        self.kind_lab.setText("Volet" if group else "Case")
+        self.name_lab.setText("Titre du volet" if group else "Libellé de la case")
+        self.name.setText(d.get("titre" if group else "label", ""))
+        self.is_all.blockSignals(True)
+        self.is_all.setChecked(bool(d.get("tout")))
+        self.is_all.blockSignals(False)
+        self.is_all.setVisible(not group)
+        self.q.blockSignals(True)
+        self.q.setPlainText("" if group else d.get("query", ""))
+        self.q.blockSignals(False)
+        show_q = not group and not d.get("tout")
+        for w in (self.q_lab, self.q, self.q_info):
+            w.setVisible(show_q)
+        self._check_query()
+
+    def _all_toggled(self, on):
+        for w in (self.q_lab, self.q, self.q_info):
+            w.setVisible(not on)
+
+    def _check_query(self):
+        q = self.q.toPlainText()
+        probs = []
+        if q.count("(") != q.count(")"):
+            probs.append("parenthèses non équilibrées")
+        if q.count('"') % 2:
+            probs.append("guillemets non appariés")
+        if re.search(r"\b(and|or|not)\b", q) and not re.search(r"\b(AND|OR|NOT)\b", q):
+            probs.append("opérateurs à écrire en majuscules (AND, OR, NOT)")
+        n = q.count(" OR ") + q.count(" AND ") + 1 if q.strip() else 0
+        self.q_info.setText(("⚠ " + " ; ".join(probs) + ". ") if probs else
+                            f"{len(q)} caractères, environ {n} termes.")
+
+    def _target_group(self):
+        it = self.tree.currentItem()
+        if it is None:
+            return None
+        return it if it.parent() is None else it.parent()
+
+    def _add_group(self):
+        self._store()
+        it = self._group_item({"titre": "Nouveau volet"})
+        it.addChild(self._element_item({"label": "Nouvelle case", "query": ""}))
+        it.setExpanded(True)
+        self.tree.setCurrentItem(it)
+        self.name.setFocus()
+        self.name.selectAll()
+
+    def _add_element(self):
+        self._store()
+        grp = self._target_group()
+        if grp is None:
+            return self._add_group()
+        cur = self.tree.currentItem()
+        idx = grp.indexOfChild(cur) + 1 if cur is not grp else grp.childCount()
+        it = self._element_item({"label": "Nouvelle case", "query": ""})
+        grp.insertChild(idx, it)
+        grp.setExpanded(True)
+        self.tree.setCurrentItem(it)
+        self.name.setFocus()
+        self.name.selectAll()
+
+    def _duplicate(self):
+        self._store()
+        it = self.tree.currentItem()
+        if it is None or it.parent() is None:
+            return
+        d = dict(it.data(0, Qt.UserRole))
+        d["label"] = d.get("label", "") + " (copie)"
+        new = self._element_item(d)
+        it.parent().insertChild(it.parent().indexOfChild(it) + 1, new)
+        self.tree.setCurrentItem(new)
+
+    def _move(self, step):
+        self._store()
+        it = self.tree.currentItem()
+        if it is None:
+            return
+        par = it.parent()
+        if par is None:
+            i = self.tree.indexOfTopLevelItem(it)
+            j = i + step
+            if not 0 <= j < self.tree.topLevelItemCount():
+                return
+            self._cur = None
+            self.tree.takeTopLevelItem(i)
+            self.tree.insertTopLevelItem(j, it)
+            it.setExpanded(True)
+        else:
+            i = par.indexOfChild(it)
+            j = i + step
+            if not 0 <= j < par.childCount():
+                return
+            self._cur = None
+            par.takeChild(i)
+            par.insertChild(j, it)
+        self.tree.setCurrentItem(it)
+
+    def _delete(self):
+        it = self.tree.currentItem()
+        if it is None:
+            return
+        d = it.data(0, Qt.UserRole) or {}
+        what = f"le volet « {d.get('titre')} » et toutes ses cases" if it.parent() is None \
+            else f"la case « {d.get('label')} »"
+        if QMessageBox.question(self, "Supprimer", f"Supprimer {what} ?") != QMessageBox.Yes:
+            return
+        self._cur = None
+        if it.parent() is None:
+            self.tree.takeTopLevelItem(self.tree.indexOfTopLevelItem(it))
+        else:
+            it.parent().removeChild(it)
+
+    def _collect(self):
+        self._store()
+        groups = []
+        for i in range(self.tree.topLevelItemCount()):
+            top = self.tree.topLevelItem(i)
+            g = {k: v for k, v in (top.data(0, Qt.UserRole) or {}).items() if k != "_group"}
+            g["elements"] = [dict(top.child(j).data(0, Qt.UserRole)) for j in range(top.childCount())]
+            groups.append(g)
+        data = {k: v for k, v in self.data.items() if k != "groupes"}
+        data["groupes"] = groups
+        return data
+
+    # -- actions -------------------------------------------------------------------- #
+    def _reset(self):
+        r = QMessageBox.question(self, "Filtres", "Revenir aux filtres fournis avec l'application ? "
+                                                  "Vos volets et cases modifiés seront remplacés.")
+        if r == QMessageBox.Yes:
+            with open(bundled_filters_path(), encoding="utf-8") as f:
+                self.data = json.load(f)
+            self._populate()
+
+    def _external(self):
+        if self._save(close=False):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(user_filters_path()))
+            QMessageBox.information(self, "Filtres", "Le fichier s'ouvre dans votre éditeur de texte. "
+                                                     "Après l'avoir enregistré, rouvrez « Modifier les "
+                                                     "filtres… » ou redémarrez l'application.")
+
+    def _save(self, close=True):
+        data = self._collect()
+        try:
+            groups = validate_filters(data)
+        except ValueError as e:
+            self.err.setText(f"Filtres non valides : {e}")
+            self.err.show()
+            return False
+        self.err.hide()
+        try:
+            with open(bundled_filters_path(), encoding="utf-8") as f:
+                bundled_titles = {g["titre"] for g in json.load(f).get("groupes", [])}
+        except (OSError, ValueError):
+            bundled_titles = set()
+        # volets fournis volontairement supprimés : ne pas les rajouter au prochain démarrage
+        data["groupes_retires"] = sorted(bundled_titles - {g["titre"] for g in groups})
+        try:
+            p = user_filters_path()
+            with open(p + ".tmp", "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            os.replace(p + ".tmp", p)
+        except OSError as e:
+            self.err.setText(f"Enregistrement impossible : {e}")
+            self.err.show()
+            return False
+        self.data = data
+        if close:
+            self.accept()
+        return True
 
 
 def scroll_wrap(widget):
@@ -387,6 +796,9 @@ class MainWindow(QMainWindow):
         self.link_cursor = 0
         self._buf = ""
         self._counts = {"total": 0, "ok": 0, "miss": 0}
+        self._json_ok = 0
+        self._log_lines = []
+        self.log_light = False
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -471,26 +883,15 @@ class MainWindow(QMainWindow):
         lay.addSpacing(14)
 
         # Filtres (volets dépliables) : ajoutés à la requête entre parenthèses
-        self.filter_groups, self.filters_file = load_filters()
         self.filter_boxes = []      # (index du groupe, label, requête, case)
+        self.filter_all = {}        # index du groupe -> case ALL
         self.filter_sections = []
-        for gi, g in enumerate(self.filter_groups):
-            sec = Disclosure(g["titre"])
-            grid = QGridLayout()
-            grid.setHorizontalSpacing(18)
-            grid.setVerticalSpacing(4)
-            for i, el in enumerate(g["elements"]):
-                cb = QCheckBox(el.get("label", "?"))
-                cb.setToolTip(el.get("query", ""))
-                cb.toggled.connect(self._filters_changed)
-                grid.addWidget(cb, i // 2, i % 2)
-                self.filter_boxes.append((gi, el.get("label", ""), el.get("query", ""), cb))
-            sec.body_lay.addLayout(grid)
-            self.filter_sections.append(sec)
-            lay.addWidget(sec)
-        if self.filter_groups:
-            lay.addWidget(hint("Cases d'un même volet combinées par OR ; volets et requête combinés par AND. "
-                               "Survolez une case pour voir les termes ajoutés."))
+        self.filters_host = QWidget()
+        self.filters_lay = QVBoxLayout(self.filters_host)
+        self.filters_lay.setContentsMargins(0, 0, 0, 0)
+        self.filters_lay.setSpacing(6)
+        lay.addWidget(self.filters_host)
+        self._build_filters()
         self.final_label = field_label("Requête envoyée à PubMed")
         self.final_query = QPlainTextEdit()
         self.final_query.setObjectName("finalQuery")
@@ -549,7 +950,38 @@ class MainWindow(QMainWindow):
         self.getpdf = QCheckBox("Télécharger les PDF des articles gratuits")
         self.getpdf.setChecked(True)
         self.getpdf.toggled.connect(self.passes.setEnabled)
-        lay.addWidget(self.getpdf)
+        self.getjson = QCheckBox("Télécharger les JSON (articles sans PDF)")
+        self.getjson.setToolTip("Passe supplémentaire après les PDF : texte intégral structuré (JSON) "
+                                "depuis NCBI BioC, Europe PMC, Springer Nature et Elsevier, pour les "
+                                "articles restés sans PDF. Le PDF reste toujours prioritaire.")
+        prow = QHBoxLayout()
+        prow.setSpacing(24)
+        prow.addWidget(self.getpdf)
+        prow.addWidget(self.getjson)
+        prow.addStretch(1)
+        lay.addLayout(prow)
+        lay.addSpacing(8)
+
+        # Sources optionnelles (menu déroulant à cases)
+        self.sources_sec = Disclosure("Sources utilisées")
+        sgrid = QGridLayout()
+        sgrid.setHorizontalSpacing(18)
+        sgrid.setVerticalSpacing(4)
+        self.source_boxes = {}
+        for i, (key, label, tip) in enumerate(SOURCES):
+            cb = QCheckBox(label)
+            cb.setChecked(True)
+            cb.setToolTip(tip)
+            cb.toggled.connect(self._sources_changed)
+            sgrid.addWidget(cb, i // 2, i % 2)
+            self.source_boxes[key] = cb
+        self.sources_sec.body_lay.addLayout(sgrid)
+        self.sources_sec.body_lay.addWidget(hint(
+            "PMC S3, Europe PMC, HAL et les sites des éditeurs restent toujours utilisés. Une source "
+            "cochée mais sans clé dans Réglages (Elsevier, Springer Nature, CORE, OpenAlex) n'est pas "
+            "interrogée."))
+        lay.addWidget(self.sources_sec)
+        self._sources_changed()
         lay.addSpacing(18)
 
         # Sortie
@@ -679,8 +1111,7 @@ class MainWindow(QMainWindow):
             return
         self.tabs.setCurrentIndex(self.TAB_SEARCH)
         self.query.setPlainText(req["query"])
-        for _, _, _, cb in self.filter_boxes:
-            cb.setChecked(False)
+        self._set_filter_labels([])
         if req["sort"]:
             self.sort_group.button({"best": 0, "recent": 1, "both": 2}[req["sort"]]).setChecked(True)
         if req["max"]:
@@ -708,6 +1139,86 @@ class MainWindow(QMainWindow):
             self.excel.setFocus()
 
     # --------------------------------------------------------------- filtres
+    def _build_filters(self, keep_labels=None):
+        """(Re)construit les volets de filtres depuis filtres.json, sans redémarrer."""
+        while self.filters_lay.count():
+            it = self.filters_lay.takeAt(0)
+            if it.widget():
+                it.widget().deleteLater()
+        self.filter_groups, self.filters_file = load_filters()
+        self.filter_boxes, self.filter_sections, self.filter_all = [], [], {}
+        keep = set(keep_labels or [])
+        for gi, g in enumerate(self.filter_groups):
+            sec = Disclosure(g["titre"])
+            grid = QGridLayout()
+            grid.setHorizontalSpacing(18)
+            grid.setVerticalSpacing(4)
+            # libellés longs : une case par ligne (sinon tronqués dans le panneau)
+            ncol = 1 if any(len(el.get("label", "")) > 26 for el in g["elements"] if not el.get("tout")) else 2
+            i = 0
+            for el in g["elements"]:
+                cb = QCheckBox(el.get("label", "?"))
+                if el.get("tout"):
+                    # case ALL : seule sur sa ligne, coche toutes les cases du volet
+                    cb.setToolTip("Toutes les recherches de ce volet, combinées par OR")
+                    f = cb.font()
+                    f.setBold(True)
+                    cb.setFont(f)
+                    if i % ncol:
+                        i += ncol - i % ncol
+                    grid.addWidget(cb, i // ncol, 0, 1, 2)
+                    i += ncol
+                    self.filter_all[gi] = cb
+                    cb.toggled.connect(lambda on, g=gi: self._toggle_all(g, on))
+                    continue
+                cb.setToolTip(el.get("query", ""))
+                cb.toggled.connect(lambda _on, g=gi: self._member_toggled(g))
+                grid.addWidget(cb, i // ncol, i % ncol)
+                i += 1
+                self.filter_boxes.append((gi, el.get("label", ""), el.get("query", ""), cb))
+            sec.body_lay.addLayout(grid)
+            self.filter_sections.append(sec)
+            self.filters_lay.addWidget(sec)
+        if self.filter_groups:
+            self.filters_lay.addWidget(hint(
+                "Cases d'un même volet combinées par OR ; volets et requête combinés par AND. "
+                "Survolez une case pour voir les termes ajoutés."))
+        for _, label, _, cb in self.filter_boxes:
+            if label in keep:
+                cb.setChecked(True)
+        if hasattr(self, "final_query"):
+            self._filters_changed()
+
+    def _toggle_all(self, gi, on):
+        boxes = [cb for g, _, _, cb in self.filter_boxes if g == gi]
+        if not on and not all(cb.isChecked() for cb in boxes):
+            return   # décochée parce qu'une case du volet a été décochée
+        for cb in boxes:
+            cb.blockSignals(True)
+            cb.setChecked(on)
+            cb.blockSignals(False)
+        self._filters_changed()
+
+    def _member_toggled(self, gi):
+        allcb = self.filter_all.get(gi)
+        if allcb is not None:
+            full = all(cb.isChecked() for g, _, _, cb in self.filter_boxes if g == gi)
+            if allcb.isChecked() != full:
+                allcb.blockSignals(True)
+                allcb.setChecked(full)
+                allcb.blockSignals(False)
+        self._filters_changed()
+
+    def _set_filter_labels(self, labels):
+        labels = set(labels or [])
+        for _, label, _, cb in self.filter_boxes:
+            cb.blockSignals(True)
+            cb.setChecked(label in labels)
+            cb.blockSignals(False)
+        for gi in self.filter_all:
+            self._member_toggled(gi)
+        self._filters_changed()
+
     def _selected_filters(self):
         """[[requêtes cochées du groupe 0], [groupe 1], …] et libellés cochés."""
         groups = [[] for _ in self.filter_groups]
@@ -735,6 +1246,15 @@ class MainWindow(QMainWindow):
             n_terms = fq.count(" OR ") + fq.count(" AND ") + 1
             self.final_info.setText(f"{len(fq)} caractères, environ {n_terms} termes. "
                                     "Filtres : " + ", ".join(labels) + ".")
+
+    def _selected_sources(self):
+        return [k for k, cb in self.source_boxes.items() if cb.isChecked()]
+
+    def _sources_changed(self, *_):
+        sel = self._selected_sources()
+        n_off = len(self.source_boxes) - len(sel)
+        self.sources_sec.head.setText("Sources utilisées" + (
+            "  (toutes)" if not n_off else f"  ({len(sel)} sur {len(self.source_boxes)})"))
 
     def _toggle_adv(self, on):
         self.adv.setVisible(on)
@@ -903,7 +1423,7 @@ class MainWindow(QMainWindow):
             cells = [self.STATUS.get(job["status"], job["status"]), job["stem"] + ".xlsx",
                      (job.get("base_query") or "(filtres seuls)") + filt,
                      f'{self.SORTS.get(job["sort"], job["sort"])} / {job["max"]}'
-                     + ("" if job["getpdf"] else " / sans PDF"),
+                     + ("" if job["getpdf"] else " / sans PDF") + (" / JSON" if job.get("getjson") else ""),
                      job.get("summary", "")]
             for c, text in enumerate(cells):
                 it = QTableWidgetItem(text)
@@ -977,13 +1497,16 @@ class MainWindow(QMainWindow):
             return
         job = self.queue[r]
         self.query.setPlainText(job.get("base_query", ""))
-        for _, label, _, cb in self.filter_boxes:
-            cb.setChecked(label in job.get("filters", []))
+        self._set_filter_labels(job.get("filters", []))
         self.excel.setText(job["stem"])
         self.outdir.setText(job["outdir"])
         self.max_results.setValue(job["max"])
         self.passes.setValue(job["passes"])
         self.getpdf.setChecked(job["getpdf"])
+        self.getjson.setChecked(bool(job.get("getjson")))
+        src = job.get("sources")
+        for k, cb in self.source_boxes.items():
+            cb.setChecked(src is None or k in src)
         self.sort_group.button({"best": 0, "recent": 1, "both": 2}.get(job["sort"], 0)).setChecked(True)
         self.tabs.setCurrentIndex(self.TAB_SEARCH)
 
@@ -1231,12 +1754,24 @@ class MainWindow(QMainWindow):
         self.k_ncbi = SecretEdit("Facultative : 10 requêtes/s au lieu de 3")
         self.k_core = SecretEdit("Facultative : copies des dépôts d'universités")
         self.k_els = SecretEdit("Facultative")
+        self.k_els_tok = SecretEdit("Facultatif : fourni par la bibliothèque d'une institution abonnée")
         self.k_oa = SecretEdit("Facultative")
+        self.k_sn_oa = SecretEdit("Facultative : texte intégral JSON (BMC, SpringerOpen…)")
+        self.k_sn_meta = SecretEdit("Facultative : liens PDF Springer, résumés")
         for lab, wdg in (("Clé API NCBI (PubMed)", self.k_ncbi), ("Clé API CORE", self.k_core),
-                         ("Clé API Elsevier", self.k_els), ("Clé API OpenAlex", self.k_oa)):
+                         ("Clé API Elsevier", self.k_els),
+                         ("Jeton institutionnel Elsevier (insttoken)", self.k_els_tok),
+                         ("Clé API OpenAlex", self.k_oa),
+                         ("Clé Springer Nature Open Access API", self.k_sn_oa),
+                         ("Clé Springer Nature Meta API", self.k_sn_meta)):
             lay.addWidget(field_label(lab, wdg.edit))
             lay.addWidget(wdg)
             lay.addSpacing(4)
+        lay.addWidget(hint("Elsevier ne donne le texte intégral par API qu'aux requêtes venant du réseau "
+                           "d'une institution abonnée, ou munies de son jeton institutionnel. "
+                           "Clés Springer Nature : dev.springernature.com (forfait gratuit, quota "
+                           "journalier). Si une seule clé couvre les deux API, saisissez-la dans les deux champs."))
+        lay.addSpacing(4)
         self.remember_keys = QCheckBox("Mémoriser les clés API sur cet ordinateur")
         lay.addWidget(self.remember_keys)
         lay.addWidget(hint(f"Les clés sont alors enregistrées en clair dans {self.settings_path}. "
@@ -1245,9 +1780,9 @@ class MainWindow(QMainWindow):
         lay.addSpacing(22)
 
         lay.addWidget(section_title("Filtres de recherche"))
-        lay.addWidget(hint("Régions, niveaux de développement et types d'articles proposés dans l'onglet "
-                           "Recherche sont définis dans un fichier modifiable (libellés et requêtes PubMed). "
-                           "Les modifications s'appliquent au prochain démarrage."))
+        lay.addWidget(hint("Régions, Burkina Faso, niveaux de développement et types d'articles proposés dans "
+                           "l'onglet Recherche sont modifiables (libellés et requêtes PubMed). Les changements "
+                           "s'appliquent dès l'enregistrement."))
         frow = QHBoxLayout()
         fb = QPushButton("Modifier les filtres…")
         fb.setObjectName("secondary")
@@ -1255,6 +1790,26 @@ class MainWindow(QMainWindow):
         frow.addWidget(fb)
         frow.addStretch(1)
         lay.addLayout(frow)
+        lay.addSpacing(22)
+
+        lay.addWidget(section_title("Apparence du journal"))
+        crow = QHBoxLayout()
+        crow.setSpacing(6)
+        self.log_theme = QComboBox()
+        for key, (label, _bg) in LOG_THEMES.items():
+            self.log_theme.addItem(label, key)
+        self.log_theme.addItem("Couleur personnalisée…", "custom")
+        self.log_theme.activated.connect(self._log_theme_chosen)
+        self.log_swatch = QLabel()
+        self.log_swatch.setFixedSize(28, 28)
+        crow.addWidget(self.log_theme, 1)
+        crow.addWidget(self.log_swatch)
+        crow.addStretch(1)
+        lay.addWidget(field_label("Fond de la zone Journal", self.log_theme))
+        lay.addLayout(crow)
+        lay.addWidget(hint("PDF obtenus en vert, articles sans PDF en magenta, JSON obtenus en cyan. Les "
+                           "couleurs du texte s'adaptent à un fond clair ou foncé."))
+        self.log_bg = LOG_THEMES["nuit"][1]
         lay.addSpacing(22)
 
         lay.addWidget(section_title("Interpréteur Python"))
@@ -1278,18 +1833,55 @@ class MainWindow(QMainWindow):
         return w
 
     def _edit_filters(self):
-        dst = user_filters_path()
-        if not os.path.exists(dst):
-            try:
-                import shutil
-                shutil.copyfile(os.path.join(RES, "filtres.json"), dst)
-            except OSError as e:
-                QMessageBox.warning(self, "Filtres", f"Copie impossible : {e}")
+        _, labels = self._selected_filters()
+        dlg = FilterEditor(self)
+        if dlg.exec() == QDialog.Accepted:
+            self._build_filters(keep_labels=labels)
+            self.phase.setText("Filtres mis à jour.")
+
+    # ------------------------------------------------------- couleur du journal
+    def _log_theme_chosen(self, idx):
+        key = self.log_theme.itemData(idx)
+        if key == "custom":
+            c = QColorDialog.getColor(QColor(self.log_bg), self, "Fond de la zone Journal")
+            if not c.isValid():
                 return
-        QDesktopServices.openUrl(QUrl.fromLocalFile(dst))
-        QMessageBox.information(self, "Filtres",
-                                f"Le fichier des filtres s'ouvre dans votre éditeur :\n{dst}\n\n"
-                                "Enregistrez-le puis redémarrez l'application pour voir les changements.")
+            self._apply_log_bg(c.name())
+        else:
+            self._apply_log_bg(LOG_THEMES[key][1])
+        self._save_settings()
+
+    def _apply_log_bg(self, color):
+        self.log_bg = QColor(color).name() if QColor(color).isValid() else LOG_THEMES["nuit"][1]
+        light = QColor(self.log_bg).lightnessF() > 0.6
+        self.log_light = light
+        fg = "#1C1D33" if light else C["log_fg"]
+        self.log.setStyleSheet(f"QPlainTextEdit#log {{ background: {self.log_bg}; color: {fg}; "
+                               f"border: 1px solid {'#C9C8D8' if light else '#2A2B45'}; }}")
+        self.log_swatch.setStyleSheet(f"background:{self.log_bg}; border:1px solid {C['rule']}; "
+                                      "border-radius:6px;")
+        idx = next((i for i in range(self.log_theme.count())
+                    if self.log_theme.itemData(i) in LOG_THEMES
+                    and LOG_THEMES[self.log_theme.itemData(i)][1].lower() == self.log_bg.lower()),
+                   self.log_theme.count() - 1)
+        self.log_theme.setCurrentIndex(idx)
+        self._recolor_log()
+
+    def _log_palette(self):
+        if getattr(self, "log_light", False):   # fond clair : teintes plus foncées, lisibles
+            return {"pdf": "#1B7F45", "nopdf": "#A0219A", "json": "#0B6E8F", "warn": "#9A5B00",
+                    "err": "#B3261E", "dim": "#6B6C80", None: "#1C1D33"}
+        return {"pdf": C["log_pdf"], "nopdf": C["log_nopdf"], "json": C["log_json"], "warn": "#E6B45C",
+                "err": "#F08A82", "dim": C["log_dim"], None: C["log_fg"]}
+
+    def _recolor_log(self):
+        """Réapplique les couleurs au journal existant après un changement de fond."""
+        lines = getattr(self, "_log_lines", [])
+        if not lines:
+            return
+        self.log.clear()
+        for text, kind in lines[-20000:]:
+            self._append(text, kind, record=False)
 
     # ---------------------------------------------------------------- log
     def _build_log_panel(self):
@@ -1310,11 +1902,13 @@ class MainWindow(QMainWindow):
 
         stats = QHBoxLayout()
         stats.setSpacing(28)
-        self.s_ok = Stat("PDF obtenus", C["eosin"])
-        self.s_miss = Stat("sans PDF", "#9EA1E6")
+        self.s_ok = Stat("PDF obtenus", C["log_pdf"])
+        self.s_miss = Stat("sans PDF", C["log_nopdf"])
         self.s_left = Stat("restants", C["log_fg"])
         self.s_rate = Stat("réussite", C["log_fg"])
-        for s in (self.s_ok, self.s_miss, self.s_left, self.s_rate):
+        self.s_json = Stat("JSON obtenus", C["log_json"])
+        self.s_json.hide()
+        for s in (self.s_ok, self.s_miss, self.s_left, self.s_rate, self.s_json):
             stats.addWidget(s)
         stats.addStretch(1)
         lay.addLayout(stats)
@@ -1413,11 +2007,19 @@ class MainWindow(QMainWindow):
                                            f"vérifiez qu'il s'agit bien de pubmed_search.py.\n{out[-300:]}")
             else:
                 missing = [f for f in ("--core-key", "--elsevier-key", "--openalex-key", "--import-pdf",
-                                       "--time-set") if f not in flags]
+                                       "--time-set", "--getjson", "--sources", "--springer-oa-key",
+                                       "--springer-meta-key") if f not in flags]
                 txt = f"Version {ver}, prête."
                 if missing:
                     txt += " Options absentes de cette version : " + ", ".join(missing) + "."
                 self.script_status.setText(txt)
+            self.k_sn_oa.setEnabled("--springer-oa-key" in flags)
+            self.k_sn_meta.setEnabled("--springer-meta-key" in flags)
+            self.getjson.setEnabled("--getjson" in flags)
+            if "--getjson" not in flags:
+                self.getjson.setChecked(False)
+            self.sources_sec.setEnabled("--sources" in flags)
+            self.k_els_tok.setEnabled("--elsevier-insttoken" in flags)
             self.k_core.setEnabled("--core-key" in flags)
             self.k_els.setEnabled("--elsevier-key" in flags)
             self.k_oa.setEnabled("--openalex-key" in flags)
@@ -1440,10 +2042,12 @@ class MainWindow(QMainWindow):
         env = QProcessEnvironment.systemEnvironment()
         env.insert("PYTHONUNBUFFERED", "1")
         env.insert("PYTHONIOENCODING", "utf-8")
-        for var in ("NCBI_API_KEY", "CORE_API_KEY", "ELSEVIER_API_KEY", "OPENALEX_API_KEY"):
-            env.remove(var)
         pairs = (("NCBI_API_KEY", self.k_ncbi), ("CORE_API_KEY", self.k_core),
-                 ("ELSEVIER_API_KEY", self.k_els), ("OPENALEX_API_KEY", self.k_oa))
+                 ("ELSEVIER_API_KEY", self.k_els), ("OPENALEX_API_KEY", self.k_oa),
+                 ("SPRINGER_OA_API_KEY", self.k_sn_oa), ("SPRINGER_META_API_KEY", self.k_sn_meta),
+                 ("ELSEVIER_INSTTOKEN", self.k_els_tok))
+        for var, _ in pairs:
+            env.remove(var)
         for var, wdg in pairs:
             if wdg.isEnabled() and wdg.text():
                 env.insert(var, wdg.text())
@@ -1514,6 +2118,8 @@ class MainWindow(QMainWindow):
         return {"stem": stem, "query": q, "base_query": " ".join(self.query.toPlainText().split()),
                 "filters": labels, "outdir": outdir, "max": self.max_results.value(),
                 "sort": self._sort_key(), "getpdf": self.getpdf.isChecked(),
+                "getjson": self.getjson.isChecked() and self.getjson.isEnabled(),
+                "sources": self._selected_sources() if self.sources_sec.isEnabled() else None,
                 "passes": self.passes.value(), "status": "attente", "summary": ""}
 
     @staticmethod
@@ -1528,6 +2134,11 @@ class MainWindow(QMainWindow):
             args.append("--getfreepaper")
             if job["passes"]:
                 args += ["--pass-number", str(job["passes"])]
+        if job.get("getjson"):
+            args.append("--getjson")
+        src = job.get("sources")
+        if src is not None and set(src) != {k for k, _, _ in SOURCES}:
+            args += ["--sources", ",".join(src) if src else "none"]
         return args
 
     def _start_search(self):
@@ -1573,10 +2184,14 @@ class MainWindow(QMainWindow):
 
     def _launch(self, script, args, kind):
         self.log.clear()
+        self._log_lines = []
         self._counts = {"total": 0, "ok": 0, "miss": 0}
+        self._json_phase = False
+        self._json_ok = 0
         self.strip.set_values(0, 0, 0)
-        for s in (self.s_ok, self.s_miss, self.s_left, self.s_rate):
+        for s in (self.s_ok, self.s_miss, self.s_left, self.s_rate, self.s_json):
             s.set("–")
+        self.s_json.setVisible("--getjson" in args)
         if kind == "search":
             self.results_dir = ""
             self.excel_path = ""
@@ -1631,6 +2246,14 @@ class MainWindow(QMainWindow):
             kind = "warn"
         elif "❌" in line or line.startswith("Traceback"):
             kind = "err"
+        m = re.match(r"\s*\[(\d+)/(\d+)\] PMID \d+ .*⇒ (.*)$", line)
+        if m:   # passe JSON
+            i, n, res = int(m.group(1)), int(m.group(2)), m.group(3)
+            if res.startswith("JSON"):
+                self._json_ok += 1
+                self.s_json.set(self._json_ok)
+                kind = "json"
+            self.phase.setText(f"Passe JSON : article {i} sur {n}")
         m = re.match(r"\s*\[(\d+)/(\d+)\] PMID \d+ .*→ (.*)$", line)
         if m:
             i, n, res = int(m.group(1)), int(m.group(2)), m.group(3)
@@ -1638,9 +2261,10 @@ class MainWindow(QMainWindow):
             c["total"] = max(c["total"], n)
             if res.startswith("OK"):
                 c["ok"] += 1
-                kind = "ok"
+                kind = "pdf"
             elif "non téléchargé" in res:
                 c["miss"] += 1
+                kind = "nopdf"
             self.strip.set_values(c["total"], c["ok"], c["miss"])
             self.s_ok.set(c["ok"])
             self.s_miss.set(c["miss"])
@@ -1665,6 +2289,12 @@ class MainWindow(QMainWindow):
         m = re.match(r"\s*Restant à télécharger\s*:\s*(\d+)", line)
         if m:
             self.s_left.set(m.group(1))
+        m = re.match(r"\s*JSON obtenus\s*:\s*(\d+)", line)
+        if m:
+            self.s_json.set(m.group(1))
+            self.s_json.show()
+        if "🧾 Passe JSON" in line:
+            self.phase.setText("Passe JSON : texte intégral des articles sans PDF…")
         if "Recherche dans PubMed" in line or "ESearch" in line:
             self.phase.setText("Recherche dans PubMed…")
         elif "Récupération des métadonnées" in line:
@@ -1675,12 +2305,18 @@ class MainWindow(QMainWindow):
             self.phase.setText(line.strip(" ⏳"))
         self._append(line + "\n", kind)
 
-    def _append(self, text, kind=None):
-        colors = {"ok": "#E79AB8", "warn": "#E6B45C", "err": "#F08A82", "dim": C["log_dim"]}
+    def _append(self, text, kind=None, record=True):
+        colors = self._log_palette()
+        if record:
+            if not hasattr(self, "_log_lines"):
+                self._log_lines = []
+            self._log_lines.append((text, kind))
+            if len(self._log_lines) > 25000:
+                del self._log_lines[:5000]
         cur = self.log.textCursor()
         cur.movePosition(QTextCursor.End)
         fmt = QTextCharFormat()
-        fmt.setForeground(QColor(colors.get(kind, C["log_fg"])))
+        fmt.setForeground(QColor(colors.get(kind, colors[None])))
         cur.insertText(text, fmt)
         bar = self.log.verticalScrollBar()
         if bar.value() >= bar.maximum() - 40:
@@ -1742,6 +2378,11 @@ class MainWindow(QMainWindow):
         self.max_results.setValue(int(s.get("max_results", 100)))
         self.passes.setValue(int(s.get("passes", 0)))
         self.getpdf.setChecked(bool(s.get("getpdf", True)))
+        self.getjson.setChecked(bool(s.get("getjson", False)))
+        src = s.get("sources")
+        for k, cb in self.source_boxes.items():
+            cb.setChecked(not isinstance(src, list) or k in src)
+        self._apply_log_bg(s.get("log_bg") or LOG_THEMES["nuit"][1])
         idx = {"best": 0, "recent": 1, "both": 2}.get(s.get("sort", "best"), 0)
         self.sort_group.button(idx).setChecked(True)
         self.outdir.setText(s.get("outdir") or os.path.join(
@@ -1755,6 +2396,9 @@ class MainWindow(QMainWindow):
         self.k_core.setText(keys.get("core", ""))
         self.k_els.setText(keys.get("elsevier", ""))
         self.k_oa.setText(keys.get("openalex", ""))
+        self.k_sn_oa.setText(keys.get("springer_oa", ""))
+        self.k_sn_meta.setText(keys.get("springer_meta", ""))
+        self.k_els_tok.setText(keys.get("elsevier_insttoken", ""))
         if s.get("python_custom"):
             self.py_custom.setChecked(True)
         self.py_path.setText(s.get("python_path", ""))
@@ -1777,6 +2421,9 @@ class MainWindow(QMainWindow):
             "max_results": self.max_results.value(),
             "passes": self.passes.value(),
             "getpdf": self.getpdf.isChecked(),
+            "getjson": self.getjson.isChecked(),
+            "sources": self._selected_sources(),
+            "log_bg": getattr(self, "log_bg", LOG_THEMES["nuit"][1]),
             "sort": self._sort_key(),
             "outdir": self.outdir.text().strip(),
             "excel": self.excel.text().strip(),
@@ -1790,7 +2437,9 @@ class MainWindow(QMainWindow):
         }
         if self.remember_keys.isChecked():
             s["keys"] = {"ncbi": self.k_ncbi.text(), "core": self.k_core.text(),
-                         "elsevier": self.k_els.text(), "openalex": self.k_oa.text()}
+                         "elsevier": self.k_els.text(), "openalex": self.k_oa.text(),
+                         "springer_oa": self.k_sn_oa.text(), "springer_meta": self.k_sn_meta.text(),
+                         "elsevier_insttoken": self.k_els_tok.text()}
         try:
             tmp = self.settings_path + ".tmp"
             with open(tmp, "w", encoding="utf-8") as f:
@@ -1890,6 +2539,16 @@ QTableWidget#queue {{ background: {C['panel']}; border: 1px solid {C['rule']}; b
 QTableWidget#queue::item {{ padding: 6px 8px; border: none; }}
 QHeaderView::section {{ background: {C['slide']}; border: none; border-bottom: 1px solid {C['rule']};
     padding: 6px 8px; font-weight: 600; font-size: 12.5px; color: {C['muted']}; }}
+QComboBox {{ background: {C['panel']}; border: 1px solid {C['rule']}; border-radius: 6px; padding: 6px 9px;
+    min-height: 22px; }}
+QComboBox:focus {{ border: 2px solid {C['hema']}; padding: 5px 8px; }}
+QTreeWidget#filterTree {{ background: {C['panel']}; border: 1px solid {C['rule']}; border-radius: 6px;
+    padding: 4px; font-size: 13.5px; selection-background-color: {C['hema_soft']}; selection-color: {C['ink']}; }}
+QTreeWidget#filterTree::item {{ padding: 3px 2px; }}
+QDialog {{ background: {C['slide']}; }}
+QPlainTextEdit#filterJson {{ background: {C['panel']}; border: 1px solid {C['rule']}; border-radius: 6px;
+    font-family: "{mono}"; font-size: 12.5px; padding: 8px; }}
+QCheckBox:disabled, QToolButton#disclosure:disabled {{ color: #A3A4B5; }}
 QCheckBox, QRadioButton {{ spacing: 8px; }}
 QCheckBox::indicator, QRadioButton::indicator {{ width: 16px; height: 16px; }}
 QCheckBox::indicator {{ border: 1px solid #A7A8BC; border-radius: 4px; background: {C['panel']}; }}

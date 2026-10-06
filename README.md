@@ -13,10 +13,10 @@ Page des téléchargements : **[Dernière version](https://github.com/sergesawad
 
 | Fichier | Pour |
 |---|---|
-| `PubMedSearch-Setup-1.2.0.exe` | Windows 10 et 11 (64 bits) |
-| `PubMedSearch-1.2.0-macOS-AppleSilicon.dmg` | Mac à puce Apple (M1, M2, M3, M4…), macOS 12 Monterey ou plus récent |
-| `PubMedSearch-1.2.0-macOS-Intel.dmg` | Mac à processeur Intel, macOS 12 Monterey ou plus récent |
-| `pubmed-search-gui_1.2.0_amd64.deb` | Ubuntu 20.04+, Debian 10+, Linux Mint 20+ (64 bits) |
+| `PubMedSearch-Setup-1.3.0.exe` | Windows 10 et 11 (64 bits) |
+| `PubMedSearch-1.3.0-macOS-AppleSilicon.dmg` | Mac à puce Apple (M1, M2, M3, M4…), macOS 12 Monterey ou plus récent |
+| `PubMedSearch-1.3.0-macOS-Intel.dmg` | Mac à processeur Intel, macOS 12 Monterey ou plus récent |
+| `pubmed-search-gui_1.3.0_amd64.deb` | Ubuntu 20.04+, Debian 10+, Linux Mint 20+ (64 bits) |
 | `envoyer-vers-pubmed-search-1.0.0.xpi` | Extension Firefox (facultative) |
 | `SHA256SUMS.txt`, `SHA256SUMS-macOS.txt` | Empreintes pour vérifier les fichiers |
 
@@ -28,7 +28,7 @@ Rien d'autre à installer : Python et ses bibliothèques sont inclus dans l'appl
 
 ### Windows 10 / 11
 
-1. Téléchargez `PubMedSearch-Setup-1.2.0.exe` et double-cliquez dessus.
+1. Téléchargez `PubMedSearch-Setup-1.3.0.exe` et double-cliquez dessus.
 2. Windows affiche « Windows a protégé votre ordinateur » : l'installateur n'est pas signé
    numériquement. Cliquez sur **Informations complémentaires**, puis **Exécuter quand même**.
 3. Acceptez la demande d'autorisation administrateur, choisissez le dossier, terminez.
@@ -59,7 +59,7 @@ Vos réglages (`~/Library/Preferences/pubmed-search-gui`) sont conservés.
 
 ```bash
 cd ~/Téléchargements
-sudo apt install ./pubmed-search-gui_1.2.0_amd64.deb
+sudo apt install ./pubmed-search-gui_1.3.0_amd64.deb
 ```
 
 `apt` installe aussi les bibliothèques graphiques nécessaires. Lancez **PubMed Search**
@@ -94,7 +94,15 @@ Ouvrez l'onglet **Réglages** :
    → API Key Management.
 3. **Clé API CORE** (facultative) : copies d'articles dans les dépôts d'universités.
    Gain modeste, recherches plus lentes.
-4. Cochez **Mémoriser les clés API** pour ne pas les saisir à chaque fois. Elles sont alors
+   **Clé API Elsevier** (facultative, dev.elsevier.com) : attention, Elsevier ne sert le texte
+   intégral par API qu'aux requêtes venant du réseau d'une institution abonnée, ou munies d'un
+   **jeton institutionnel** (insttoken, à demander à la bibliothèque). Hors de ces cas, la clé
+   seule est refusée (AUTHENTICATION_ERROR), même pour des articles gratuits du Lancet.
+4. **Clés Springer Nature** (facultatives, gratuites sur
+   [dev.springernature.com](https://dev.springernature.com)) : *Open Access API* (texte intégral
+   en JSON des articles BMC, SpringerOpen, Nature Communications…) et *Meta API* (lien PDF des
+   articles Springer libres, résumés). Si une seule clé couvre les deux API, saisissez-la deux fois.
+5. Cochez **Mémoriser les clés API** pour ne pas les saisir à chaque fois. Elles sont alors
    enregistrées en clair dans le fichier de réglages de votre ordinateur, et ne sont jamais
    écrites dans le journal ni dans les fichiers de résultats.
 
@@ -106,16 +114,21 @@ Ouvrez l'onglet **Réglages** :
 
 1. **Requête PubMed** : même syntaxe que sur le site, par exemple
    `(NETosis[ti] OR "extracellular trap*"[ti]) AND review[pt]`.
-2. **Filtres** (facultatifs, volets dépliables) : *Régions cibles*, *Niveau de développement*,
-   *Type d'articles*. Plusieurs cases d'un même volet sont combinées par OR ; les volets entre
-   eux et avec votre requête par AND. La requête complète envoyée à PubMed s'affiche en dessous.
+2. **Filtres** (facultatifs, volets dépliables) : *Régions cibles*, *Burkina Faso*, *Niveau de
+   développement*, *Type d'articles*. Plusieurs cases d'un même volet sont combinées par OR ; les
+   volets entre eux et avec votre requête par AND. La case **ALL** coche toutes les cases de son
+   volet. La requête complète envoyée à PubMed s'affiche en dessous.
 3. **Tri** : Pertinence, Plus récents, ou Les deux (les deux listes sont fusionnées et le
    journal indique les articles propres à chacune).
 4. **Articles maximum par tri** (limite NCBI : 10 000) et **passes supplémentaires**
    (relances sur les articles gratuits non téléchargés ; 0 par défaut).
-5. **Dossier de destination** (bouton *Nouveau dossier…* pour le créer) et **nom du fichier
+5. **Télécharger les PDF** et, juste à côté, **Télécharger les JSON** : passe supplémentaire
+   qui récupère le texte intégral structuré des articles restés sans PDF (voir plus bas).
+   **Sources utilisées** (volet dépliable) : décochez Elsevier, Springer Nature, Unpaywall, CORE
+   ou OpenAlex pour ne pas les interroger (toutes cochées par défaut).
+6. **Dossier de destination** (bouton *Nouveau dossier…* pour le créer) et **nom du fichier
    Excel**.
-6. **Lancer la recherche**. Le journal à droite affiche la progression ; **Arrêter** interrompt
+7. **Lancer la recherche**. Le journal à droite affiche la progression ; **Arrêter** interrompt
    proprement (les résultats déjà obtenus sont enregistrés).
 
 ![Filtres et requête finale](docs/captures/filtres.png)
@@ -128,9 +141,34 @@ Un dossier `NomExcel_JJ.MM.AAAA_HHhMM` contenant :
 |---|---|
 | `NomExcel.xlsx` | Onglet *Articles* : PMID, DOI, titre, type, auteurs, emails, gratuité, lien vers le PDF. Onglet *Résumé* : requête, nombre de résultats, taux de réussite, sources, durée. |
 | `PDF_NomExcel/` | Les PDF, nommés `PMID-Auteur_Initiales(Année).pdf` |
+| `JSON_NomExcel/` | (option JSON) Texte intégral structuré des articles sans PDF, `PMID-Auteur_Initiales(Année).json` |
+| `NomExcel_PMID_json.txt` | (option JSON) Les PMID qui ont un JSON |
 | `NomExcel_PMID_tous.txt` | Tous les PMID, séparés par des virgules |
 | `NomExcel_PMID_sans_pdf.txt` | Les PMID sans PDF |
 | `error.txt` | Pour chaque article gratuit non obtenu : les causes et un lien à ouvrir à la main |
+
+### Les JSON de texte intégral
+
+Le PDF reste toujours la cible. Pour les articles sans PDF, la passe JSON essaie dans l'ordre :
+NCBI BioC (PMC Open Access et manuscrits d'auteurs), Europe PMC (JATS), Springer Nature Open
+Access API, API Elsevier (si l'article est libre pour votre clé), puis Springer Nature Meta API
+(résumé seulement). Chaque fichier suit le même schéma :
+
+```json
+{"schema": "pubmed_search-fulltext/1", "pmid": "…", "pmcid": "…", "doi": "…", "titre": "…",
+ "source": "NCBI BioC (PMC)", "niveau": "texte intégral", "licence": "CC BY",
+ "resume": "…", "sections": [{"titre": "Methods", "type": "methods", "texte": "…"}],
+ "figures": [{"label": "Fig 1", "legende": "…"}], "tableaux": […], "references": ["…"]}
+```
+
+`niveau` vaut `résumé` quand seule la notice est disponible. L'Excel indique pour chaque article
+le lien vers le JSON, sa source et son contenu. Karger n'a pas d'API publique de texte intégral.
+
+### Couleurs et apparence du journal
+
+Dans le journal, les PDF obtenus sont en vert, les articles sans PDF en magenta et les JSON
+obtenus en cyan. Réglages → **Apparence du journal** permet de choisir un autre fond (sombre,
+clair ou couleur personnalisée) ; les couleurs du texte s'adaptent.
 
 ### File d'attente
 
@@ -175,15 +213,19 @@ dans votre navigateur :
 
 **Pourquoi certains articles « gratuits » ne sont-ils pas téléchargés ?**
 L'application n'utilise que les voies d'accès autorisées : stockage officiel de PMC sur
-Amazon S3, Europe PMC, Unpaywall, HAL, CORE et sites des éditeurs. Le site web de PMC
+Amazon S3, Europe PMC, Unpaywall, HAL, CORE, API Elsevier et Springer Nature, et sites des
+éditeurs. Le site web de PMC
 interdit le téléchargement automatisé, et beaucoup d'éditeurs (Wiley, Elsevier, OUP…)
 bloquent les programmes. Le fichier `error.txt` donne pour chaque article la cause et le lien
 à ouvrir vous-même.
 
-**Puis-je modifier les filtres (régions, types d'articles) ?**
-Oui : Réglages → **Modifier les filtres…** ouvre le fichier `filtres.json` ; redémarrez
-l'application après l'avoir enregistré. Attention aux termes ambigus : `Guinea[tiab]` trouve
-aussi « guinea pig », `global[tiab]` est très fréquent hors contexte géographique.
+**Puis-je modifier les filtres (régions, Burkina Faso, types d'articles) ?**
+Oui : Réglages → **Modifier les filtres…** ouvre un éditeur : choisissez un volet ou une case,
+modifiez le libellé et la requête PubMed, ajoutez, déplacez ou supprimez des cases, puis
+**Enregistrer** (application immédiate). Les parenthèses et guillemets sont vérifiés. Attention
+aux termes ambigus : `Guinea[tiab]` trouve aussi « guinea pig », `global[tiab]` est très
+fréquent hors contexte géographique. Les requêtes du volet Burkina Faso n'ont pas de balise de
+champ : elles cherchent dans tous les champs, **affiliations des auteurs comprises**.
 
 **Le script de recherche peut-il évoluer sans réinstaller l'application ?**
 Oui : Réglages → **Choisir…** permet d'utiliser une autre version de `pubmed_search.py`

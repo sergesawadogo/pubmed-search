@@ -1,5 +1,5 @@
 {
-  "_aide": "Filtres de l'interface PubMed Search. Plusieurs cases d'un même groupe sont combinées par OR, les groupes entre eux et avec la requête par AND. Modifiez les libellés et les requêtes librement (syntaxe PubMed), puis redémarrez l'application.",
+  "_aide": "Filtres de l'interface PubMed Search. Plusieurs cases d'un même groupe sont combinées par OR, les groupes entre eux et avec la requête par AND. Un élément avec \"tout\": true (case ALL) coche toutes les cases de son groupe. Modifiez les libellés et les requêtes librement (syntaxe PubMed) dans Réglages → Modifier les filtres… : les changements s'appliquent dès l'enregistrement.",
   "groupes": [
     {
       "titre": "Régions cibles",
@@ -27,6 +27,31 @@
         {
           "label": "Afrique Australe",
           "query": "\"South Africa\"[tiab] OR Pretoria[tiab] OR \"Cape Town\"[tiab] OR Namibia[tiab] OR Windhoek[tiab] OR Rundu[tiab] OR Botswana[tiab] OR Gaborone[tiab] OR Francistown[tiab] OR Eswatini[tiab] OR Mbabane[tiab] OR Manzini[tiab] OR Lesotho[tiab] OR Maseru[tiab] OR Teyateyaneng[tiab]"
+        }
+      ]
+    },
+    {
+      "titre": "Burkina Faso",
+      "elements": [
+        {
+          "label": "ALL (toutes les recherches ci-dessous)",
+          "tout": true
+        },
+        {
+          "label": "Appellations politiques",
+          "query": "\"Burkina Faso\" OR Burkina OR \"Upper Volta\" OR \"Haute-Volta\""
+        },
+        {
+          "label": "Centres de recherche (publics et privés)",
+          "query": "(\"Centre Muraz\" OR Muraz OR IRSS OR CERBA OR CNRFP OR CRUN OR \"Clinical Research Unit of Nanoro\" OR \"Groupe de Recherche Action en Santé\" OR GRAS OR PrïmO OR \"Joseph Ki-Zerbo\" OR UJKZ OR \"Université de Ouagadougou\" OR \"Nazi Boni\" OR UNB OR \"Université Polytechnique de Bobo-Dioulasso\" OR \"Norbert Zongo\" OR \"Université de Koudougou\" OR \"Saint Thomas d'Aquin\" OR USTA) AND (\"Burkina Faso\" OR Burkina OR Ouagadougou OR \"Bobo-Dioulasso\" OR Nanoro)"
+        },
+        {
+          "label": "Hôpitaux (CHU, CHR, centres médicaux majeurs)",
+          "query": "(\"Centre hospitalier universitaire\" OR CSPS OR Yalgado OR \"Souro Sanou\" OR Tengandogo OR Tengendogo OR Tingandogo OR Bogodogo OR \"Charles de Gaulle\" OR \"CHU-YO\" OR CHUSS OR \"CHU-B\" OR \"CHUP-CDG\" OR CHUP OR \"CHR Kaya\" OR \"CHR Ouahigouya\" OR \"CHR Koudougou\" OR \"CHR Dedougou\" OR \"CHR Tenkodogo\" OR \"CHR Fada\" OR \"CHR Banfora\" OR \"CHR Gaoua\" OR \"CHR Dori\" OR \"CHRU de Bobo-Dioulasso\" OR \"Hôpital de Référence de Bobo-Dioulasso\" OR Pala OR HOSCO OR \"Hôpital Saint Camille\" OR CMSC OR \"Paul VI\" OR Schiphra) AND (Burkina OR Ouagadougou OR Dioulasso)"
+        },
+        {
+          "label": "Régions sanitaires et chefs-lieux",
+          "query": "(Ouagadougou OR \"Bobo-Dioulasso\" OR \"Bobo Dioulasso\" OR Koudougou OR Ouahigouya OR Kaya OR Banfora OR Dedougou OR Dédougou OR Tenkodogo OR \"Fada N'Gourma\" OR \"Fada Ngourma\" OR Dori OR Gaoua OR Manga OR Ziniaire OR Ziniaré OR Hounde OR Houndé OR Pouytenga OR Koupela OR Koupéla OR Nouna OR Tougan OR Boromo OR Leo OR Léo OR Pô OR Djibo OR \"Gorom-Gorom\" OR Orodara OR Diebougou OR Diébougou OR Titao OR Yako OR Kongoussi OR Boulsa OR Reo OR Nanoro OR Sarfalao OR Laforisso OR Boussé OR Pissy OR Bogandé OR Bogande OR Diapaga OR \"Boucle du Mouhoun\" OR \"Hauts-Bassins\" OR \"Plateau-Central\" OR \"Centre-Nord\" OR \"Centre-Sud\" OR \"Centre-Est\" OR \"Centre-Ouest\" OR Sahel OR Cascades OR Bankui OR Djôrô OR Djoro OR Goulmou OR Guiriko OR Kadiogo OR Kuilsé OR Kuilse OR Liptako OR Nando OR Nakambé OR Nakambe OR Nazinon OR Oubri OR Sirba OR Soum OR Tannounyan OR Tapoa OR Sourou OR Yaadga) AND (\"Burkina Faso\" OR Burkina)"
         }
       ]
     },
@@ -68,5 +93,6 @@
         }
       ]
     }
-  ]
+  ],
+  "version": 2
 }

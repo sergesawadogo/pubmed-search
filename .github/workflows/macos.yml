@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
 
 env:
-  TAG: v1.2.0
+  TAG: v1.3.0
 
 jobs:
   build:

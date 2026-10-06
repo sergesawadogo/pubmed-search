@@ -14,6 +14,18 @@ Sources de PDF essayées, dans l'ordre :
   6. Site de l'éditeur (DOI, liens LinkOut PubMed) : balise citation_pdf_url,
      motifs d'URL connus.
 
+  Avec une clé Springer Nature Meta API : lien PDF officiel des articles Springer/BMC/
+  Nature signalés en libre accès.
+
+Passe JSON (--getjson), pour les articles restés sans PDF (le PDF reste prioritaire) :
+  1. NCBI BioC API (PMC Open Access + manuscrits d'auteurs, texte intégral structuré).
+  2. Europe PMC fullTextXML (JATS) converti en JSON.
+  3. Springer Nature Open Access API (JATS, clé requise).
+  4. API Elsevier (texte intégral JSON si l'article est libre pour la clé).
+  5. Springer Nature Meta API (métadonnées + résumé seulement, en dernier recours).
+  Tous les JSON ont le même schéma (voir jats_to_doc / bioc_to_doc).
+  Karger : pas d'API publique de texte intégral (accès TDM sur contrat, par FTP).
+
 Le script NE contourne PAS les protections anti-robot (CAPTCHA, preuve de travail
 JavaScript, Cloudflare) : ces cas sont détectés et consignés dans error.txt.
 
@@ -60,7 +72,7 @@ try:  # optionnel : lecture du texte des PDF (--import-pdf, contrôle API Elsevi
 except ImportError:
     PdfReader = None
 
-VERSION = "1.6.1"
+VERSION = "1.7.2"
 TOOL_NAME = "pubmed_search_py"
 DEFAULT_EMAIL = "sergesawadogo@gmail.com"
 
@@ -76,6 +88,16 @@ ELSEVIER_ARTICLE = "https://api.elsevier.com/content/article/"
 # préfixes DOI des revues hébergées sur ScienceDirect (Elsevier, Cell Press, JBC, JLR…)
 ELSEVIER_DOI_PREFIXES = ("10.1016/", "10.1074/", "10.1194/", "10.3168/", "10.1053/", "10.1067/",
                          "10.1078/", "10.1006/", "10.1054/", "10.1157/", "10.1203/")
+BIOC_PMC = "https://www.ncbi.nlm.nih.gov/research/bionlp/RESTful/pmcoa.cgi/BioC_json/{}/unicode"
+EPMC_REST = "https://www.ebi.ac.uk/europepmc/webservices/rest/"
+SPRINGER_META = "https://api.springernature.com/meta/v2/json"
+SPRINGER_OA_JATS = "https://api.springernature.com/openaccess/jats"
+# préfixes DOI Springer Nature (Springer, BMC, Nature, Palgrave, EPJ, Kluwer, Pleiades…)
+SPRINGER_DOI_PREFIXES = ("10.1007/", "10.1186/", "10.1038/", "10.1057/", "10.1140/", "10.1245/",
+                         "10.1023/", "10.1134/", "10.1365/", "10.1617/")
+KARGER_DOI_PREFIX = "10.1159/"
+# sources désactivables (--sources) ; les autres (PMC S3, Europe PMC, HAL, éditeur) restent actives
+OPTIONAL_SOURCES = ("elsevier", "springer-oa", "springer-meta", "unpaywall", "core", "openalex")
 
 BROWSER_HEADERS = {
     "User-Agent": ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
@@ -134,24 +156,42 @@ def fmt_duration(sec):
 # --------------------------------------------------------------------------- #
 class Http:
     def __init__(self, email, api_key=None, openalex_key=None, timeout=40, elsevier_key=None,
-                 core_key=None):
+                 core_key=None, springer_oa_key=None, springer_meta_key=None, sources=None):
         self.email = email
         self.api_key = api_key
-        self.openalex_key = openalex_key
-        self.elsevier_key = elsevier_key
-        self.core_key = core_key
+        self.sources = set(OPTIONAL_SOURCES if sources is None else sources)
+        # une source décochée = clé ignorée (aucune requête vers ce service)
+        self.openalex_key = openalex_key if "openalex" in self.sources else None
+        self.elsevier_key = elsevier_key if "elsevier" in self.sources else None
+        self.core_key = core_key if "core" in self.sources else None
+        self.springer_oa_key = springer_oa_key if "springer-oa" in self.sources else None
+        self.springer_meta_key = springer_meta_key if "springer-meta" in self.sources else None
+        self.elsevier_insttoken = None
+        self.els_denied = False   # clé Elsevier valide mais sans droits (AUTHENTICATION_ERROR)
         self.timeout = timeout
         self.intervals = {
             "ncbi": 0.11 if api_key else 0.35,   # 10 req/s avec clé, 3 sans
             "idconv": 0.35, "europepmc": 0.12, "unpaywall": 0.12,
             "openalex": 0.12, "s3": 0.0, "publisher": 1.0, "handle": 0.2, "elsevier": 0.15, "hal": 0.3, "core": 6.5, "core_dl": 1.0,
             "repository": 1.0,
+            "bioc": 0.34,          # NCBI BioC (pas de limite publiée : 3 req/s par prudence)
+            "springer": 1.0,       # forfait gratuit Springer Nature : quota journalier limité
         }
+
         self.counts = Counter()
         self._lock = threading.Lock()
         self._next = {}
         self._klocks = {}
         self._local = threading.local()
+
+    def use(self, source):
+        return source in self.sources
+
+    def elsevier_headers(self):
+        h = {"X-ELS-APIKey": self.elsevier_key or ""}
+        if getattr(self, "elsevier_insttoken", None):
+            h["X-ELS-Insttoken"] = self.elsevier_insttoken
+        return h
 
     def _session(self):
         s = getattr(self._local, "s", None)
@@ -227,6 +267,11 @@ class Article:
         self.pdf_rel = ""
         self.pdf_source = ""
         self.pdf_pass = None
+        self.json_rel = ""
+        self.json_source = ""
+        self.json_level = ""       # "texte intégral" / "résumé"
+        self.json_attempts = []    # (source, url, raison)
+        self.springer_meta = None  # notice Springer Meta API (réutilisée par la passe JSON)
         self.oa_hint = False       # une source externe signale une version libre
         self.epmc_pdf_urls = []
         self.landing_urls = []
@@ -237,6 +282,18 @@ class Article:
     def note(self, pass_no, source, url, reason):
         with self._lock:
             self.attempts.append((pass_no, source, url or "", reason))
+
+    def jnote(self, source, url, reason):
+        with self._lock:
+            self.json_attempts.append((source, url or "", reason))
+
+    @property
+    def is_springer(self):
+        return bool(self.doi) and self.doi.lower().startswith(SPRINGER_DOI_PREFIXES)
+
+    @property
+    def is_elsevier(self):
+        return bool(self.doi) and self.doi.lower().startswith(ELSEVIER_DOI_PREFIXES)
 
     @property
     def free_like(self):
@@ -785,17 +842,80 @@ class Downloader:
             else (ELSEVIER_ARTICLE + "pii/" + pii)
         ok, _, _ = self.try_url(a, p, "API Elsevier", url + "?httpAccept=application/pdf",
                                 "elsevier", follow_html=False,
-                                extra_headers={"X-ELS-APIKey": self.http.elsevier_key,
+                                extra_headers={**self.http.elsevier_headers(),
                                                "Accept": "application/pdf"})
         last = a.attempts[-1][3] if a.attempts else ""
         if not ok and "AUTHENTICATION_ERROR" in last:
             # clé non habilitée à l'API de texte intégral : inutile d'insister pour les autres articles
             if not getattr(self, "_els_disabled", False):
                 self._els_disabled = True
-                log("⚠ API Elsevier : clé non habilitée au texte intégral (AUTHENTICATION_ERROR). "
-                    "API désactivée pour le reste de l'exécution — demander l'accès au support Elsevier.")
+                self.http.els_denied = True
+                log("⚠ API Elsevier : clé valide mais sans droits sur le texte intégral "
+                    "(AUTHENTICATION_ERROR). Elsevier ne sert le texte intégral qu'aux requêtes venant du "
+                    "réseau d'une institution abonnée, ou munies d'un jeton institutionnel "
+                    "(--elsevier-insttoken). API désactivée pour le reste de l'exécution.")
             return False
         return ok
+
+    def springer_meta_record(self, a, note):
+        """Notice Springer Nature Meta API (v2) d'un DOI Springer ; mise en cache sur l'article.
+        note(source, url, raison) consigne les échecs."""
+        if a.springer_meta is not None:
+            return a.springer_meta or None
+        a.springer_meta = {}
+        if getattr(self, "_springer_meta_disabled", False):
+            return None
+        src = "Springer Meta API"
+        try:
+            r = self.http.request("GET", SPRINGER_META, "springer", retries=2,
+                                  params={"q": f'doi:"{a.doi}"', "api_key": self.http.springer_meta_key,
+                                          "p": 1})
+        except requests.RequestException as e:
+            note(src, SPRINGER_META, f"erreur réseau : {type(e).__name__}")
+            return None
+        if r.status_code in (401, 403, 429):
+            if not getattr(self, "_springer_meta_disabled", False):
+                self._springer_meta_disabled = True
+                why = "quota dépassé" if r.status_code == 429 else "clé refusée ou non habilitée"
+                log(f"⚠ Springer Nature Meta API : {why} (HTTP {r.status_code}). Désactivée pour "
+                    "le reste de l'exécution.")
+            note(src, SPRINGER_META, f"API HTTP {r.status_code}")
+            return None
+        if r.status_code != 200:
+            note(src, SPRINGER_META, f"API HTTP {r.status_code}")
+            return None
+        try:
+            recs = r.json().get("records") or []
+        except ValueError:
+            note(src, SPRINGER_META, "réponse JSON invalide")
+            return None
+        rec = next((x for x in recs if (x.get("doi") or "").lower() == a.doi.lower()), None)
+        if not rec:
+            note(src, SPRINGER_META, "DOI inconnu de l'API Meta")
+            return None
+        a.springer_meta = rec
+        return rec
+
+    def from_springer_meta(self, a, p):
+        """Lien PDF officiel donné par la Meta API pour les articles Springer Nature en libre accès."""
+        src = "Springer Meta API"
+        rec = self.springer_meta_record(a, lambda s, u, why: a.note(p, s, u, why))
+        if not rec:
+            return False
+        if str(rec.get("openaccess", "")).lower() != "true":
+            a.note(p, src, "", "article non libre d'après Springer Nature (openaccess=false)")
+            return False
+        a.oa_hint = True
+        urls = [u.get("value") for u in (rec.get("url") or [])
+                if isinstance(u, dict) and (u.get("format") or "").lower() == "pdf" and u.get("value")]
+        if not urls:
+            urls = [f"https://link.springer.com/content/pdf/{a.doi}.pdf"]
+        for u in urls[:2]:
+            ok, _, _ = self.try_url(a, p, src, u.replace("http://", "https://", 1), "publisher",
+                                    follow_html=False)
+            if ok:
+                return True
+        return False
 
     def from_s3(self, a, p):
         if not a.pmcid:
@@ -1002,7 +1122,10 @@ class Downloader:
                     done = True
                     break
         lands = []
-        if not done:
+        if not done and a.is_springer and self.http.springer_meta_key \
+                and not getattr(self, "_springer_meta_disabled", False):
+            done = self.from_springer_meta(a, p)
+        if not done and self.http.use("unpaywall"):
             pdfs, lands = self.from_unpaywall(a, p)
             if pdfs and not getattr(a, "manual_pdf", ""):
                 a.manual_pdf = pdfs[0]   # lien PDF direct Unpaywall, pour le téléchargement manuel
@@ -1043,12 +1166,374 @@ class Downloader:
                 if attempt("Site éditeur", u, "publisher"):
                     done = True
                     break
+        if not done and a.doi.lower().startswith(KARGER_DOI_PREFIX) and a.free_like \
+                and not any("Karger" in x[1] for x in a.attempts):
+            a.note(p, "Karger", "", "Karger ne propose pas d'API publique de texte intégral "
+                                    "(accès TDM sur contrat, par FTP) ; PDF à ouvrir à la main")
         if not done and not tried and not a.attempts:
             a.note(p, "—", "", "aucun identifiant exploitable (ni PMCID, ni DOI, ni lien éditeur)")
         elif not done and not any(x[0] == p for x in a.attempts):
             a.note(p, "—", "", "aucune URL de PDF trouvée par les sources interrogées")
         if done:
             self.source_ok[a.pdf_source.split(" (")[0]] += 1
+        return a
+
+
+# --------------------------------------------------------------------------- #
+# Passe JSON : texte intégral structuré pour les articles sans PDF
+# --------------------------------------------------------------------------- #
+FULLTEXT_MIN_CHARS = 1500   # en deçà, le « texte intégral » n'est qu'un résumé
+
+
+def _local(tag):
+    return tag.rsplit("}", 1)[-1] if isinstance(tag, str) else ""
+
+
+def _strip_ns(root):
+    for el in root.iter():
+        el.tag = _local(el.tag)
+        for k in list(el.attrib):
+            if "}" in k:
+                el.attrib[_local(k)] = el.attrib.pop(k)
+    return root
+
+
+def _clean(s):
+    return re.sub(r"\s+", " ", s or "").strip()
+
+
+def new_doc(a, source, licence=""):
+    return OrderedDict([
+        ("schema", "pubmed_search-fulltext/1"), ("pmid", a.pmid), ("pmcid", a.pmcid), ("doi", a.doi),
+        ("titre", a.title), ("journal", a.journal), ("annee", a.year), ("source", source),
+        ("niveau", "résumé"), ("licence", licence),
+        ("recupere_le", dt.datetime.now().strftime("%Y-%m-%dT%H:%M")),
+        ("resume", ""), ("sections", []), ("figures", []), ("tableaux", []), ("references", []),
+    ])
+
+
+def _finish(doc):
+    body = sum(len(s["texte"]) for s in doc["sections"])
+    doc["niveau"] = "texte intégral" if body >= FULLTEXT_MIN_CHARS else "résumé"
+    doc["nb_caracteres"] = body + len(doc["resume"])
+    return doc
+
+
+def jats_to_doc(article, a, source):
+    """Article JATS (PMC, Europe PMC, Springer Nature) -> dictionnaire du schéma commun."""
+    _strip_ns(article)
+    lic = article.find(".//permissions/license")
+    licence = ""
+    if lic is not None:
+        licence = lic.get("href", "") or _clean(" ".join(lic.itertext()))[:300]
+    doc = new_doc(a, source, licence)
+    t = article.find(".//article-meta/title-group/article-title")
+    if t is not None and _clean("".join(t.itertext())):
+        doc["titre"] = _clean("".join(t.itertext()))
+    abs_el = article.find(".//article-meta/abstract")
+    if abs_el is not None:
+        doc["resume"] = "\n".join(_clean("".join(x.itertext())) for x in abs_el.iter("p")) \
+            or _clean("".join(abs_el.itertext()))
+
+    def text_of(el):
+        # paragraphes de la section, sans les sous-sections ni les figures/tableaux
+        out = []
+        for ch in el:
+            if ch.tag in ("p", "list", "disp-quote", "boxed-text", "statement"):
+                out.append(_clean("".join(ch.itertext())))
+        return "\n".join(x for x in out if x)
+
+    def walk(sec, parents):
+        title = _clean("".join(sec.find("title").itertext())) if sec.find("title") is not None else ""
+        path = parents + ([title] if title else [])
+        txt = text_of(sec)
+        if txt:
+            doc["sections"].append({"titre": " > ".join(path) or "(sans titre)",
+                                    "type": sec.get("sec-type", ""), "texte": txt})
+        for sub in sec.findall("sec"):
+            walk(sub, path)
+
+    body = article.find("body")
+    if body is not None:
+        loose = text_of(body)
+        if loose:
+            doc["sections"].append({"titre": "(texte)", "type": "", "texte": loose})
+        for sec in body.findall("sec"):
+            walk(sec, [])
+    for f in article.iter("fig"):
+        cap = f.find("caption")
+        lab = _clean("".join(f.find("label").itertext())) if f.find("label") is not None else ""
+        if cap is not None:
+            doc["figures"].append({"label": lab, "legende": _clean("".join(cap.itertext()))})
+    for tw in article.iter("table-wrap"):
+        cap = tw.find("caption")
+        lab = _clean("".join(tw.find("label").itertext())) if tw.find("label") is not None else ""
+        doc["tableaux"].append({"label": lab, "legende": _clean("".join(cap.itertext())) if cap is not None else ""})
+    for ref in article.iter("ref"):
+        c = ref.find("mixed-citation")
+        if c is None:
+            c = ref.find("element-citation")
+        if c is None:
+            c = ref.find("citation")
+        if c is not None:
+            doc["references"].append(_clean(" ".join(c.itertext())))
+    return _finish(doc)
+
+
+def bioc_to_doc(data, a):
+    """Réponse JSON de l'API BioC (NCBI) -> schéma commun."""
+    colls = data if isinstance(data, list) else [data]
+    passages = []
+    for c in colls:
+        for d in (c or {}).get("documents") or []:
+            passages += d.get("passages") or []
+    if not passages:
+        return None
+    licence = ""
+    doc = new_doc(a, "NCBI BioC (PMC)")
+    cur = None
+    abstract = []
+    for ps in passages:
+        inf = ps.get("infons") or {}
+        st = (inf.get("section_type") or "").upper()
+        typ = (inf.get("type") or "").lower()
+        txt = _clean(ps.get("text"))
+        licence = licence or inf.get("license", "")
+        if not txt:
+            continue
+        if st == "TITLE" or typ == "front":
+            if typ in ("front", "title") and not doc["titre"]:
+                doc["titre"] = txt
+            continue
+        if st == "ABSTRACT":
+            if not typ.startswith("title"):
+                abstract.append(txt)
+            continue
+        if st == "REF" or typ == "ref":
+            if typ != "title":
+                doc["references"].append(txt)
+            continue
+        if st == "FIG" or typ.startswith("fig"):
+            doc["figures"].append({"label": inf.get("id", ""), "legende": txt})
+            continue
+        if st == "TABLE" or typ.startswith("table"):
+            if "caption" in typ:
+                doc["tableaux"].append({"label": inf.get("id", ""), "legende": txt})
+            continue
+        if typ.startswith("title"):
+            cur = {"titre": txt, "type": st.lower(), "texte": ""}
+            doc["sections"].append(cur)
+            continue
+        if cur is None or cur["type"] != st.lower():
+            cur = {"titre": st.title() or "(texte)", "type": st.lower(), "texte": ""}
+            doc["sections"].append(cur)
+        cur["texte"] = (cur["texte"] + "\n" + txt).strip()
+    doc["sections"] = [s for s in doc["sections"] if s["texte"]]
+    doc["resume"] = "\n".join(abstract)
+    doc["licence"] = licence
+    return _finish(doc)
+
+
+class JsonFetcher:
+    """Récupère un JSON de texte intégral pour les articles restés sans PDF."""
+
+    def __init__(self, http, json_dir, json_dirname, dl=None):
+        self.http = http
+        self.json_dir = json_dir
+        self.json_dirname = json_dirname
+        self.dl = dl   # Downloader : réutilise la notice Springer Meta mise en cache
+        self.source_ok = Counter()
+        self.level_ok = Counter()
+
+    def _get(self, a, src, url, service, retries=2, **kw):
+        try:
+            r = self.http.request("GET", url, service, retries=retries, **kw)
+        except requests.RequestException as e:
+            a.jnote(src, url, f"erreur réseau : {type(e).__name__}")
+            return None
+        if r.status_code != 200:
+            a.jnote(src, url, f"HTTP {r.status_code}")
+            return None
+        return r
+
+    def save(self, a, doc):
+        fname = a.pdf_filename()[:-4] + ".json"
+        tmp = os.path.join(self.json_dir, fname + ".part")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(doc, f, ensure_ascii=False, indent=1)
+        os.replace(tmp, os.path.join(self.json_dir, fname))
+        a.json_rel = f"{self.json_dirname}/{fname}"
+        a.json_source = doc["source"]
+        a.json_level = doc["niveau"]
+
+    # -- sources ---------------------------------------------------------------- #
+    def from_bioc(self, a):
+        src = "NCBI BioC (PMC)"
+        url = BIOC_PMC.format(a.pmcid or a.pmid)
+        r = self._get(a, src, url, "bioc")
+        if r is None:
+            return None
+        try:
+            data = r.json()
+        except ValueError:
+            a.jnote(src, url, "absent du corpus BioC (article hors du sous-ensemble Open Access "
+                              "de PMC et des manuscrits d'auteurs)")
+            return None
+        doc = bioc_to_doc(data, a)
+        if doc is None:
+            a.jnote(src, url, "réponse BioC vide")
+        return doc
+
+    def from_epmc(self, a):
+        if not a.pmcid:
+            return None
+        src = "Europe PMC (JATS)"
+        url = f"{EPMC_REST}{a.pmcid}/fullTextXML"
+        try:
+            # Europe PMC répond 404 ou 500 quand le texte intégral n'est pas dans son sous-ensemble
+            # Open Access : pas de nouvel essai (sinon 2 attentes inutiles par article)
+            r = self.http.request("GET", url, "europepmc", retries=0)
+        except requests.RequestException as e:
+            a.jnote(src, url, f"erreur réseau : {type(e).__name__}")
+            return None
+        if r.status_code in (404, 500):
+            a.jnote(src, url, f"absent : texte intégral non diffusé par Europe PMC (HTTP {r.status_code})")
+            return None
+        if r.status_code != 200:
+            a.jnote(src, url, f"HTTP {r.status_code}")
+            return None
+        try:
+            root = ET.fromstring(r.content)
+        except ET.ParseError:
+            a.jnote(src, url, "XML illisible")
+            return None
+        art = root if _local(root.tag) == "article" else next(
+            (e for e in root.iter() if _local(e.tag) == "article"), None)
+        if art is None:
+            a.jnote(src, url, "pas d'article JATS dans la réponse")
+            return None
+        return jats_to_doc(art, a, src)
+
+    def from_springer_oa(self, a):
+        if getattr(self, "_sn_oa_disabled", False):
+            return None
+        src = "Springer Nature Open Access API"
+        try:
+            r = self.http.request("GET", SPRINGER_OA_JATS, "springer", retries=2,
+                                  params={"q": f'doi:"{a.doi}"', "api_key": self.http.springer_oa_key})
+        except requests.RequestException as e:
+            a.jnote(src, SPRINGER_OA_JATS, f"erreur réseau : {type(e).__name__}")
+            return None
+        if r.status_code in (401, 403, 429):
+            if not getattr(self, "_sn_oa_disabled", False):
+                self._sn_oa_disabled = True
+                why = "quota dépassé" if r.status_code == 429 else "clé refusée ou non habilitée"
+                log(f"⚠ Springer Nature Open Access API : {why} (HTTP {r.status_code}). "
+                    "Désactivée pour le reste de l'exécution.")
+            a.jnote(src, SPRINGER_OA_JATS, f"API HTTP {r.status_code}")
+            return None
+        if r.status_code != 200:
+            a.jnote(src, SPRINGER_OA_JATS, f"API HTTP {r.status_code}")
+            return None
+        try:
+            root = _strip_ns(ET.fromstring(r.content))
+        except ET.ParseError:
+            a.jnote(src, SPRINGER_OA_JATS, "XML illisible")
+            return None
+        art = next(root.iter("article"), None)
+        if art is None:
+            a.jnote(src, SPRINGER_OA_JATS, "absent de l'API Open Access (article non OA chez "
+                                           "Springer Nature)")
+            return None
+        return jats_to_doc(art, a, src)
+
+    def from_elsevier(self, a):
+        if getattr(self, "_els_disabled", False) or getattr(self.http, "els_denied", False):
+            return None
+        src = "API Elsevier (JSON)"
+        url = ELSEVIER_ARTICLE + "doi/" + quote(a.doi, safe="/()")
+        r = self._get(a, src, url, "elsevier", params={"httpAccept": "application/json"},
+                      headers={**self.http.elsevier_headers(), "Accept": "application/json"})
+        if r is None:
+            last = a.json_attempts[-1][2] if a.json_attempts else ""
+            if last in ("HTTP 401", "HTTP 403"):
+                self._els_disabled = True
+                self.http.els_denied = True
+            return None
+        try:
+            ftr = r.json().get("full-text-retrieval-response") or {}
+        except ValueError:
+            a.jnote(src, url, "réponse JSON invalide")
+            return None
+        core = ftr.get("coredata") or {}
+        doc = new_doc(a, src, "openaccess" if str(core.get("openaccess")) in ("1", "true") else "")
+        doc["titre"] = core.get("dc:title") or doc["titre"]
+        doc["resume"] = _clean(core.get("dc:description") or "")
+        txt = ftr.get("originalText")
+        if isinstance(txt, dict):
+            txt = json.dumps(txt, ensure_ascii=False)
+        txt = (txt or "").strip()
+        if txt:
+            doc["sections"].append({"titre": "Texte intégral (format brut Elsevier)", "type": "",
+                                    "texte": txt})
+        doc = _finish(doc)
+        if doc["niveau"] != "texte intégral":
+            a.jnote(src, url, "résumé seulement (texte intégral non libre pour cette clé)")
+        return doc
+
+    def from_springer_meta(self, a):
+        src = "Springer Meta API"
+        rec = self.dl.springer_meta_record(a, a.jnote) if self.dl else None
+        if not rec:
+            return None
+        doc = new_doc(a, src, "openaccess" if str(rec.get("openaccess")).lower() == "true" else "")
+        doc["titre"] = rec.get("title") or doc["titre"]
+        ab = rec.get("abstract")
+        if isinstance(ab, dict):
+            ps = ab.get("p")
+            ab = "\n".join(ps) if isinstance(ps, list) else (ps or "")
+        doc["resume"] = _clean(ab if isinstance(ab, str) else "")
+        doc["mots_cles"] = rec.get("keyword") or rec.get("subjects") or []
+        doc = _finish(doc)
+        return doc if doc["resume"] else None
+
+    def process(self, a):
+        if STOP.is_set() or a.pdf_rel:
+            return a
+        candidates = []
+        best_abstract = None
+        steps = []
+        if a.pmcid or a.free_like:
+            steps.append(self.from_bioc)
+        if a.pmcid:
+            steps.append(self.from_epmc)
+        if a.is_springer and self.http.springer_oa_key:
+            steps.append(self.from_springer_oa)
+        if a.is_elsevier and self.http.elsevier_key:
+            steps.append(self.from_elsevier)
+        if a.is_springer and self.http.springer_meta_key:
+            steps.append(self.from_springer_meta)
+        for step in steps:
+            if STOP.is_set():
+                break
+            doc = step(a)
+            if not doc:
+                continue
+            if doc["niveau"] == "texte intégral":
+                candidates.append(doc)
+                break
+            if best_abstract is None and doc["resume"]:
+                best_abstract = doc
+        doc = candidates[0] if candidates else best_abstract
+        if doc:
+            self.save(a, doc)
+            self.source_ok[doc["source"]] += 1
+            self.level_ok[doc["niveau"]] += 1
+        elif not steps:
+            a.jnote("—", "", "aucune source JSON applicable (ni PMCID, ni gratuité, ni DOI "
+                             "Springer/Elsevier avec clé)")
+        if a.doi.lower().startswith(KARGER_DOI_PREFIX) and not (doc and doc["niveau"] == "texte intégral"):
+            a.jnote("Karger", "", "pas d'API publique de texte intégral (TDM sur contrat, par FTP)")
         return a
 
 
@@ -1061,7 +1546,8 @@ def write_excel(path, articles, summary_rows):
     ws.title = "Articles"
     headers = ["PMID", "DOI", "Titre de l'article", "Type d'article", "1er auteur",
                "Dernier auteur", "Autres auteurs", "Email (auteurs)", "Gratuit",
-               "PDF (lien local)", "PMCID", "Année", "Journal", "Source du PDF", "Tri / rang"]
+               "PDF (lien local)", "PMCID", "Année", "Journal", "Source du PDF", "Tri / rang",
+               "JSON (lien local)", "Source du JSON", "Contenu du JSON"]
     ws.append(headers)
     hfill = PatternFill("solid", fgColor="1F4E78")
     for c in ws[1]:
@@ -1071,7 +1557,8 @@ def write_excel(path, articles, summary_rows):
     for a in articles:
         row = [a.pmid, a.doi, a.title, "; ".join(a.pub_types), a.first_author, a.last_author,
                a.other_authors, a.emails, a.free, a.pdf_rel or "non téléchargé", a.pmcid,
-               a.year, a.journal, a.pdf_source, a.sort_label]
+               a.year, a.journal, a.pdf_source, a.sort_label,
+               a.json_rel or ("" if a.pdf_rel else "-"), a.json_source, a.json_level]
         ws.append([clean_xl(v) for v in row])
         r = ws.max_row
         ws.cell(r, 1).hyperlink = f"https://pubmed.ncbi.nlm.nih.gov/{a.pmid}/"
@@ -1083,7 +1570,10 @@ def write_excel(path, articles, summary_rows):
             ws.cell(r, 10).font = Font(color="0563C1", underline="single")
         else:
             ws.cell(r, 10).font = Font(color="C00000")
-    widths = [11, 26, 60, 24, 18, 18, 40, 40, 17, 42, 13, 7, 30, 22, 26]
+        if a.json_rel:
+            ws.cell(r, 16).hyperlink = a.json_rel
+            ws.cell(r, 16).font = Font(color="0563C1", underline="single")
+    widths = [11, 26, 60, 24, 18, 18, 40, 40, 17, 42, 13, 7, 30, 22, 26, 42, 26, 16]
     for i, w in enumerate(widths, 1):
         ws.column_dimensions[get_column_letter(i)].width = w
     ws.freeze_panes = "A2"
@@ -1130,7 +1620,39 @@ def classify(reason):
     return "Autre"
 
 
-def write_error_file(path, articles, meta_lines, getfree):
+def advice(articles, http, getfree):
+    """Conseils concrets d'après les échecs (clés manquantes, articles hors Open Access…)."""
+    failed = [a for a in articles if not a.pdf_rel and a.free_like]
+    out = []
+    if not getfree or not failed:
+        return out
+    els = [a for a in failed if a.is_elsevier]
+    if els and not http.elsevier_key:
+        out.append(f"{len(els)} article(s) libre(s) Elsevier/Lancet/Cell bloqué(s) par Cloudflare : une clé "
+                   "API Elsevier gratuite (dev.elsevier.com) permet souvent de les obtenir par l'API officielle "
+                   "(PDF puis JSON). PMID : " + ", ".join(a.pmid for a in els))
+    elif els and getattr(http, "els_denied", False):
+        out.append(f"{len(els)} article(s) Elsevier non obtenu(s) : la clé est valide mais Elsevier refuse le "
+                   "texte intégral hors abonnement (AUTHENTICATION_ERROR). Solutions : lancer la recherche "
+                   "depuis le réseau d'une institution abonnée à ScienceDirect, ou demander à sa bibliothèque "
+                   "un jeton institutionnel (--elsevier-insttoken). Sinon : Import manuel. PMID : "
+                   + ", ".join(a.pmid for a in els))
+    elif els:
+        out.append(f"{len(els)} article(s) Elsevier non obtenu(s) malgré la clé : voir le détail. PMID : "
+                   + ", ".join(a.pmid for a in els))
+    sn = [a for a in failed if a.is_springer]
+    if sn and not http.springer_meta_key:
+        out.append(f"{len(sn)} article(s) Springer Nature non obtenu(s) : une clé Meta API (et Open Access "
+                   "API pour le JSON) peut aider. PMID : " + ", ".join(a.pmid for a in sn))
+    pmc = [a for a in failed if a.pmcid and any("absent du jeu PMC" in x[3] for x in a.attempts)]
+    if pmc:
+        out.append(f"{len(pmc)} article(s) lisible(s) gratuitement sur PMC mais hors du sous-ensemble Open "
+                   "Access (aucune voie automatisée autorisée) : utiliser l'Import manuel. PMID : "
+                   + ", ".join(a.pmid for a in pmc))
+    return out
+
+
+def write_error_file(path, articles, meta_lines, getfree, tips=()):
     failed = [a for a in articles if not a.pdf_rel and a.free_like]
     other = [a for a in articles if not a.pdf_rel and not a.free_like]
     cats = Counter()
@@ -1151,6 +1673,11 @@ def write_error_file(path, articles, meta_lines, getfree):
         f.write(f"Articles gratuits/OA non téléchargés : {len(failed)}\n")
         f.write(f"Articles sans mention de gratuité ni version OA détectée, non téléchargés : "
                 f"{len(other)}\n\n")
+        if tips:
+            f.write("CONSEILS :\n")
+            for t in tips:
+                f.write(f"  • {t}\n")
+            f.write("\n")
         f.write("Synthèse des causes (dernière passe, une ligne par tentative) :\n")
         for k, v in cats.most_common():
             f.write(f"  {v:5d}  {k}\n")
@@ -1167,20 +1694,42 @@ def write_error_file(path, articles, meta_lines, getfree):
         if other:
             f.write("\n" + "-" * 78 + "\nARTICLES NON GRATUITS (aucune version libre détectée) — "
                     "PMID : " + ", ".join(a.pmid for a in other) + "\n")
+        jtried = [a for a in articles if not a.pdf_rel and (a.json_attempts or a.json_rel)]
+        if jtried:
+            jc = Counter()
+            for a in jtried:
+                for src, _, why in a.json_attempts:
+                    jc[f"{src} : {why.split(' (')[0] if 'absent' in why else classify(why)}"] += 1
+            f.write("\n" + "-" * 78 + "\nPASSE JSON (articles sans PDF)\n" + "-" * 78 + "\n")
+            f.write(f"JSON texte intégral : {sum(1 for a in jtried if a.json_level == 'texte intégral')} | "
+                    f"JSON résumé seulement : {sum(1 for a in jtried if a.json_level == 'résumé')} | "
+                    f"sans JSON : {sum(1 for a in jtried if not a.json_rel)}\n")
+            f.write("Synthèse des échecs JSON :\n")
+            for k, v in jc.most_common():
+                f.write(f"  {v:5d}  {k}\n")
+            for a in jtried:
+                res = f"{a.json_level} ({a.json_source})" if a.json_rel else "aucun JSON"
+                f.write(f"\nPMID {a.pmid} | DOI {a.doi or '-'} | PMCID {a.pmcid or '-'} → {res}\n")
+                for src, url, why in a.json_attempts:
+                    f.write(f"  [JSON] {src} : {why}" + (f"\n             URL : {url}" if url else "") + "\n")
 
 
 # --------------------------------------------------------------------------- #
 # Programme principal
 # --------------------------------------------------------------------------- #
+SECRET_FLAGS = ("--api-key", "--openalex-key", "--elsevier-key", "--core-key", "--springer-oa-key",
+                "--springer-meta-key", "--elsevier-insttoken")
+
+
 def masked_argv():
     """Ligne de commande sans les clés API (pour error.txt)."""
     out, hide = [], False
     for x in sys.argv:
         if hide:
             out.append("***"); hide = False; continue
-        if x in ("--api-key", "--openalex-key", "--elsevier-key", "--core-key"):
+        if x in SECRET_FLAGS:
             hide = True
-        elif x.startswith(("--api-key=", "--openalex-key=", "--elsevier-key=", "--core-key=")):
+        elif x.startswith(tuple(f + "=" for f in SECRET_FLAGS)):
             x = x.split("=", 1)[0] + "=***"
         out.append(x)
     return " ".join(out)
@@ -1368,6 +1917,19 @@ def wait_until(target):
         time.sleep(min(remaining, 30))
 
 
+def parse_sources(s):
+    items = [x.strip().lower() for x in (s or "").split(",") if x.strip()]
+    if items in (["all"], ["toutes"]):
+        return list(OPTIONAL_SOURCES)
+    if items in (["none"], ["aucune"]):
+        return []
+    bad = [x for x in items if x not in OPTIONAL_SOURCES]
+    if bad:
+        raise argparse.ArgumentTypeError(f"source(s) inconnue(s) : {', '.join(bad)} ; "
+                                         f"choisir parmi {', '.join(OPTIONAL_SOURCES)}")
+    return items
+
+
 def build_parser():
     p = argparse.ArgumentParser(
         description="Recherche PubMed et téléchargement des PDF d'articles en libre accès.",
@@ -1383,6 +1945,13 @@ def build_parser():
     p.add_argument("--most-recent", action="store_true",
                    help="tri par date de publication la plus récente")
     p.add_argument("--getfreepaper", action="store_true", help="télécharger les PDF")
+    p.add_argument("--getjson", action="store_true",
+                   help="passe JSON : texte intégral structuré (BioC PMC, Europe PMC, Springer Nature, "
+                        "Elsevier) pour les articles restés sans PDF")
+    p.add_argument("--sources", type=parse_sources, default=None,
+                   help="sources optionnelles à utiliser, séparées par des virgules, parmi : "
+                        + ", ".join(OPTIONAL_SOURCES) + " (défaut : toutes ; 'none' = aucune). "
+                        "PMC S3, Europe PMC, HAL et sites des éditeurs restent toujours actifs.")
     p.add_argument("--pass-number", type=int, default=0,
                    help="nombre de passes supplémentaires sur les articles gratuits non téléchargés")
     p.add_argument("--time-set", type=parse_time_set,
@@ -1398,9 +1967,18 @@ def build_parser():
     p.add_argument("--elsevier-key", default=os.environ.get("ELSEVIER_API_KEY"),
                    help="clé API Elsevier gratuite (dev.elsevier.com, $ELSEVIER_API_KEY) : PDF des "
                         "articles libres ScienceDirect/Cell/JBC")
+    p.add_argument("--elsevier-insttoken", default=os.environ.get("ELSEVIER_INSTTOKEN"),
+                   help="jeton institutionnel Elsevier ($ELSEVIER_INSTTOKEN), fourni par Elsevier à une "
+                        "institution abonnée : donne le texte intégral hors du réseau de l'institution")
     p.add_argument("--core-key", default=os.environ.get("CORE_API_KEY"),
                    help="clé API CORE gratuite (core.ac.uk/services/api, $CORE_API_KEY) : copies "
                         "des dépôts institutionnels")
+    p.add_argument("--springer-oa-key", default=os.environ.get("SPRINGER_OA_API_KEY"),
+                   help="clé Springer Nature Open Access API (dev.springernature.com, "
+                        "$SPRINGER_OA_API_KEY) : texte intégral JATS -> JSON")
+    p.add_argument("--springer-meta-key", default=os.environ.get("SPRINGER_META_API_KEY"),
+                   help="clé Springer Nature Meta API ($SPRINGER_META_API_KEY) : lien PDF des "
+                        "articles Springer libres, résumé en dernier recours pour le JSON")
     p.add_argument("--import-pdf", metavar="DOSSIER",
                    help="mode import : range les PDF téléchargés à la main depuis DOSSIER "
                         "(ex. ~/Téléchargements) dans un dossier de résultats (--results)")
@@ -1452,15 +2030,23 @@ def main():
     pdf_dirname = f"PDF_{stem}"
     pdf_dir = os.path.join(folder, pdf_dirname)
     os.makedirs(pdf_dir if args.getfreepaper else folder, exist_ok=True)
+    json_dirname = f"JSON_{stem}"
+    json_dir = os.path.join(folder, json_dirname)
+    if args.getjson:
+        os.makedirs(json_dir, exist_ok=True)
 
     http = Http(args.email, args.api_key, args.openalex_key, args.timeout, args.elsevier_key,
-                args.core_key)
+                args.core_key, args.springer_oa_key, args.springer_meta_key, args.sources)
+    http.elsevier_insttoken = args.elsevier_insttoken if args.elsevier_key else None
     t0 = time.monotonic()
     log(f"pubmed_search.py v{VERSION} — {run_dt:%d/%m/%Y %Hh%M}")
     log(f"Requête : {args.query}")
     log(f"Dossier : {os.path.abspath(folder)}")
     log(f"Email NCBI/Unpaywall : {args.email}")
     key_status = check_ncbi_credentials(http)
+    off = [x for x in OPTIONAL_SOURCES if not http.use(x)]
+    if off:
+        log("ℹ Sources désactivées : " + ", ".join(off))
 
     sorts = []
     if args.best_match or not args.most_recent:
@@ -1508,8 +2094,9 @@ def main():
 
     passes_done = 0
     dl = None
+    jf = None
     interrupted = False
-    if args.getfreepaper and articles:
+    if (args.getfreepaper or args.getjson) and articles:
         try:
             log("🔗 Enrichissement des identifiants et des liens (ID converter PMC, Europe PMC, "
                 "LinkOut" + (", OpenAlex" if args.openalex_key else "") + ")…")
@@ -1518,14 +2105,15 @@ def main():
                     "non trouvés par les autres sources.")
             idconv_fill(http, articles)
             europepmc_enrich(http, articles)
-            elink_prlinks(http, [a for a in articles if a.free != "Non" or not a.pmcid])
-            openalex_enrich(http, articles)
+            if args.getfreepaper:
+                elink_prlinks(http, [a for a in articles if a.free != "Non" or not a.pmcid])
+                openalex_enrich(http, articles)
             # le PMCID a pu être découvert après coup
             for a in articles:
                 if a.pmcid and a.free == "Free article":
                     a.free = "Free PMC article"
             dl = Downloader(http, pdf_dir, pdf_dirname)
-            for p in range(1, args.pass_number + 2):
+            for p in (range(1, args.pass_number + 2) if args.getfreepaper else []):
                 if p == 1:
                     targets = articles
                 else:
@@ -1551,6 +2139,22 @@ def main():
                         log(f"  [{i}/{n}] PMID {a.pmid} [{a.free}] → {status}")
                 ok_now = sum(1 for a in articles if a.pdf_rel)
                 log(f"  Fin de passe {p} : {ok_now} PDF au total")
+            if args.getjson and not STOP.is_set():
+                jf = JsonFetcher(http, json_dir, json_dirname, dl)
+                targets = [a for a in articles if not a.pdf_rel]
+                log(f"\n🧾 Passe JSON : {len(targets)} article(s) sans PDF")
+                n = len(targets)
+                with ThreadPoolExecutor(max_workers=max(1, args.workers)) as ex:
+                    futs = {ex.submit(jf.process, a): a for a in targets}
+                    for i, fut in enumerate(as_completed(futs), 1):
+                        a = futs[fut]
+                        try:
+                            fut.result()
+                        except Exception as e:  # noqa
+                            a.jnote("script", "", f"exception : {type(e).__name__}: {e}")
+                        status = f"JSON {a.json_level} ({a.json_source})" if a.json_rel else "pas de JSON"
+                        log(f"  [{i}/{n}] PMID {a.pmid} [{a.free}] ⇒ {status}")
+                log(f"  Fin de la passe JSON : {sum(1 for a in articles if a.json_rel)} JSON")
         except KeyboardInterrupt:
             STOP.set()
             interrupted = True
@@ -1571,6 +2175,11 @@ def main():
         f.write(",".join(a.pmid for a in articles))
     with open(os.path.join(folder, f"{stem}_PMID_sans_pdf.txt"), "w", encoding="utf-8") as f:
         f.write(",".join(a.pmid for a in articles if not a.pdf_rel))
+    n_json = sum(1 for a in articles if a.json_rel)
+    n_json_ft = sum(1 for a in articles if a.json_level == "texte intégral")
+    if args.getjson:
+        with open(os.path.join(folder, f"{stem}_PMID_json.txt"), "w", encoding="utf-8") as f:
+            f.write(",".join(a.pmid for a in articles if a.json_rel))
 
     req_detail = ", ".join(f"{k}: {v}" for k, v in http.counts.most_common())
     src_detail = ", ".join(f"{k}: {v}" for k, v in (dl.source_ok.most_common() if dl else []))
@@ -1602,14 +2211,25 @@ def main():
         ("Gratuits/OA restant à télécharger", remaining),
         ("PDF par source", src_detail),
         ("Passes effectuées", passes_done),
+        ("Passe JSON demandée (--getjson)", "oui" if args.getjson else "non"),
+        ("JSON obtenus (articles sans PDF)", n_json if args.getjson else "-"),
+        ("  dont texte intégral", n_json_ft if args.getjson else "-"),
+        ("  dont résumé seulement", (n_json - n_json_ft) if args.getjson else "-"),
+        ("JSON par source", ", ".join(f"{k}: {v}" for k, v in jf.source_ok.most_common()) if jf else "-"),
+        ("PDF ou JSON texte intégral / tous les articles", pct(n_pdf + n_json_ft, n)),
+        ("Sources optionnelles actives", ", ".join(x for x in OPTIONAL_SOURCES if http.use(x)) or "aucune"),
         ("Durée", fmt_duration(elapsed)),
         ("Requêtes HTTP (total)", http.total),
         ("Requêtes HTTP par service", req_detail),
         ("Email transmis à NCBI/Unpaywall", args.email),
         ("Clé API NCBI", key_status),
         ("Clé API OpenAlex", "fournie" if args.openalex_key else "non fournie (OpenAlex non interrogé)"),
-        ("Clé API Elsevier", "fournie" if args.elsevier_key else "non fournie (API Elsevier non interrogée)"),
+        ("Clé API Elsevier", ("fournie" + (" + jeton institutionnel" if http.elsevier_insttoken else "")
+                              + (" — refusée pour le texte intégral (pas de droits)" if http.els_denied else ""))
+                             if args.elsevier_key else "non fournie (API Elsevier non interrogée)"),
         ("Clé API CORE", "fournie" if args.core_key else "non fournie (CORE non interrogé)"),
+        ("Clé Springer Nature Open Access", "fournie" if args.springer_oa_key else "non fournie"),
+        ("Clé Springer Nature Meta", "fournie" if args.springer_meta_key else "non fournie"),
         ("Interrompu", "oui" if interrupted else "non"),
     ]
     xlsx_path = os.path.join(folder, os.path.basename(args.output))
@@ -1618,7 +2238,8 @@ def main():
             f"Commande : {masked_argv()}", f"Version script : {VERSION} | Python {sys.version.split()[0]}"
             f" | requests {requests.__version__}",
             f"Passes : {passes_done} | PDF : {n_pdf}/{n} | Requêtes : {http.total} ({req_detail})"]
-    write_error_file(os.path.join(folder, "error.txt"), articles, meta, args.getfreepaper)
+    tips = advice(articles, http, args.getfreepaper)
+    write_error_file(os.path.join(folder, "error.txt"), articles, meta, args.getfreepaper or args.getjson, tips)
 
     log("\n" + "=" * 60)
     log("📈 STATISTIQUES")
@@ -1633,10 +2254,18 @@ def main():
         log(f"  Restant à télécharger          : {remaining}")
         log(f"  PDF par source                 : {src_detail or '-'}")
         log(f"  Passes effectuées              : {passes_done}")
+    if args.getjson:
+        log(f"  JSON obtenus                   : {n_json}  (texte intégral : {n_json_ft}, "
+            f"résumé : {n_json - n_json_ft})")
+        log(f"  JSON par source                : "
+            f"{', '.join(f'{k}: {v}' for k, v in jf.source_ok.most_common()) if jf else '-'}")
+    for t in tips:
+        log(f"  💡 {t}")
     log(f"  Durée                          : {fmt_duration(elapsed)}")
     log(f"  Requêtes HTTP                  : {http.total}  ({req_detail})")
     log(f"\n  Excel : {xlsx_path}")
-    log(f"  Fichiers : {stem}_PMID_tous.txt, {stem}_PMID_sans_pdf.txt, error.txt")
+    log(f"  Fichiers : {stem}_PMID_tous.txt, {stem}_PMID_sans_pdf.txt"
+        + (f", {stem}_PMID_json.txt" if args.getjson else "") + ", error.txt")
     return 0
 
 

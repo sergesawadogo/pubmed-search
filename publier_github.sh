@@ -16,17 +16,26 @@ cd "$(dirname "$0")"
 
 OWNER="sergesawadogo"
 REPO="pubmed-search"
-TAG="v1.2.0"
-TITLE="PubMed Search 1.2.0"
-NOTES="docs/notes-version-1.2.0.md"
+VERSION=$(python3 interface/packaging/version.py)   # lue dans interface/pubmed_gui.py
+TAG="v$VERSION"
+TITLE="PubMed Search $VERSION"
+NOTES="docs/notes-version-$VERSION.md"
 API="${GH_API:-https://api.github.com}"          # variables GH_* : tests uniquement
 UPLOADS="${GH_UPLOADS:-https://uploads.github.com}"
 GITURL="${GH_GIT:-https://github.com/$OWNER/$REPO.git}"
-ASSETS=(release/PubMedSearch-Setup-1.2.0.exe release/pubmed-search-gui_1.2.0_amd64.deb
+ASSETS=(release/PubMedSearch-Setup-$VERSION.exe release/pubmed-search-gui_${VERSION}_amd64.deb
         release/envoyer-vers-pubmed-search-1.0.0.xpi release/SHA256SUMS.txt)
 
+[ -f "$NOTES" ] || { echo "Notes de version absentes : $NOTES"; exit 1; }
 for cmd in git curl python3; do
   command -v "$cmd" >/dev/null || { echo "Commande manquante : $cmd (sudo apt install $cmd)"; exit 1; }
+done
+# Fichiers envoyés en morceaux (.part00, .part01…) : reconstitution automatique
+for f in "${ASSETS[@]}"; do
+  if [ ! -f "$f" ] && ls "$f".part?? >/dev/null 2>&1; then
+    echo "Reconstitution de $f à partir de ses morceaux…"
+    cat "$f".part?? > "$f"
+  fi
 done
 for f in "${ASSETS[@]}"; do
   [ -f "$f" ] || { echo "Fichier absent : $f — placez les installateurs dans le dossier release/."; exit 1; }
