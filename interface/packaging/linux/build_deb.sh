@@ -27,7 +27,19 @@ rm -rf "$ROOT"
 mkdir -p "$ROOT/DEBIAN" "$ROOT/opt" "$ROOT/usr/bin" "$ROOT/usr/share/applications" \
          "$ROOT/usr/share/icons/hicolor/512x512/apps" "$ROOT/usr/share/doc/$PKG"
 cp -r "dist/$PKG" "$ROOT/opt/$PKG"
-ln -s "/opt/$PKG/$PKG" "$ROOT/usr/bin/$PKG"
+# Lanceur : depuis le menu ou le dock, la sortie d'erreur (invisible) est ajoutée au journal
+# ~/.config/pubmed-search-gui/demarrage.log ; depuis un terminal, elle reste à l'écran.
+cat > "$ROOT/usr/bin/$PKG" <<'LAUNCH'
+#!/bin/sh
+APP=/opt/pubmed-search-gui/pubmed-search-gui
+if [ -t 2 ]; then
+  exec "$APP" "$@"
+fi
+LOGDIR="${XDG_CONFIG_HOME:-$HOME/.config}/pubmed-search-gui"
+mkdir -p "$LOGDIR" 2>/dev/null
+exec "$APP" "$@" 2>>"$LOGDIR/demarrage.log"
+LAUNCH
+chmod 755 "$ROOT/usr/bin/$PKG"
 cp resources/icon.png "$ROOT/usr/share/icons/hicolor/512x512/apps/$PKG.png"
 cp resources/fonts/OFL-*.txt "$ROOT/usr/share/doc/$PKG/"
 cat > "$ROOT/usr/share/applications/$PKG.desktop" <<DESK
@@ -36,7 +48,8 @@ Type=Application
 Name=PubMed Search
 GenericName=Recherche PubMed et PDF
 Comment=Rechercher dans PubMed et télécharger les PDF en libre accès
-Exec=$PKG %u
+Exec=/usr/bin/$PKG %u
+StartupNotify=true
 MimeType=x-scheme-handler/pubmedsearch;
 Icon=$PKG
 Terminal=false

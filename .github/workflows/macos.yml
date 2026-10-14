@@ -9,9 +9,6 @@ on:
     paths: ["interface/**", "script/**", ".github/workflows/macos.yml"]
   workflow_dispatch:
 
-env:
-  TAG: v1.3.0
-
 jobs:
   build:
     strategy:
@@ -41,6 +38,8 @@ jobs:
 
   release:
     needs: build
+    # publie les .dmg réussis même si l'autre architecture a échoué
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -49,11 +48,16 @@ jobs:
         with:
           path: dmg
           merge-multiple: true
+        continue-on-error: true
       - name: Ajouter les .dmg à la Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          ls dmg/*.dmg >/dev/null 2>&1 || { echo "Aucun .dmg à publier"; exit 1; }
           cd dmg
+          # version lue dans le nom des fichiers : PubMedSearch-<version>-macOS-….dmg
+          TAG="v$(ls *.dmg | head -1 | sed -E 's/^PubMedSearch-([0-9.]+)-macOS-.*/\1/')"
+          echo "Release : $TAG"
           sha256sum *.dmg > SHA256SUMS-macOS.txt
           cat SHA256SUMS-macOS.txt
           gh release upload "$TAG" *.dmg SHA256SUMS-macOS.txt --clobber --repo "$GITHUB_REPOSITORY"

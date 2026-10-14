@@ -50,7 +50,11 @@ for i in 1 2 3 4 5; do
   if hdiutil create -volname "PubMed Search $VERSION" -srcfolder "$STAGE" -ov -format UDZO "$DMG"; then
     ok=1; break
   fi
-  echo "hdiutil : essai $i échoué, nouvel essai dans 10 s…"; sleep 10
+  echo "hdiutil : essai $i échoué, nouvel essai dans 10 s…"
+  # Sur GitHub Actions, l'antivirus XProtect garde parfois l'image ouverte : on l'arrête
+  # (contournement connu, actions/runner-images#7522). Jamais sur un Mac personnel.
+  if [ -n "${CI:-}" ]; then sudo -n pkill -9 XProtect >/dev/null 2>&1 || true; fi
+  sleep 10
 done
 [ "$ok" = 1 ] || { echo "Impossible de créer l'image disque"; exit 1; }
 rm -rf "$STAGE"

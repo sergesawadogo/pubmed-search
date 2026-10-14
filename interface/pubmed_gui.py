@@ -19,7 +19,7 @@ import threading
 
 APP_NAME = "PubMed Search"
 APP_ID = "pubmed-search-gui"
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.3.1"
 
 
 # --------------------------------------------------------------------------- #
@@ -95,8 +95,9 @@ if len(sys.argv) >= 3 and sys.argv[1] == "--run-script":
 # --------------------------------------------------------------------------- #
 from PySide6.QtCore import (Qt, QDateTime, QProcess, QProcessEnvironment,  # noqa: E402
                             QStandardPaths, QTimer, QUrl, Signal, QCoreApplication,
-                            QLockFile, QFileSystemWatcher, QEvent, QObject)
-from PySide6.QtGui import (QColor, QDesktopServices, QFont, QFontDatabase,  # noqa: E402
+                            QLockFile, QFileSystemWatcher, QEvent, QObject,
+                            qInstallMessageHandler, QtMsgType)
+from PySide6.QtGui import (QColor, QDesktopServices, QFont, QFontDatabase, QGuiApplication,  # noqa: E402
                            QIcon, QPainter, QPainterPath, QSyntaxHighlighter,
                            QTextCharFormat, QTextCursor)
 from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QDateTimeEdit,  # noqa: E402
@@ -142,6 +143,147 @@ def config_dir():
         d = os.path.join(os.path.expanduser("~"), ".config", APP_ID)
     os.makedirs(d, exist_ok=True)
     return d
+
+
+# --------------------------------------------------------------------------- #
+# Journal de démarrage (demarrage.log dans le dossier des réglages)
+# Sert à diagnostiquer une application qui « ne s'ouvre pas » : lancement depuis le menu
+# ou le dock, sans terminal pour voir les messages d'erreur.
+# --------------------------------------------------------------------------- #
+_LOG = None
+
+
+def startup_log_path():
+    return os.path.join(config_dir(), "demarrage.log")
+
+
+def log_open():
+    global _LOG
+    try:
+        p = startup_log_path()
+        if os.path.exists(p) and os.path.getsize(p) > 512 * 1024:
+            os.replace(p, p + ".ancien")
+        _LOG = open(p, "a", encoding="utf-8", buffering=1)
+    except OSError:
+        _LOG = None
+
+
+def log(msg):
+    if _LOG is None:
+        return
+    import time
+    try:
+        _LOG.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} [{os.getpid()}] {msg}\n")
+    except Exception:  # noqa
+        pass
+
+
+def _qt_message(mode, context, message):
+    names = {QtMsgType.QtDebugMsg: "debug", QtMsgType.QtInfoMsg: "info",
+             QtMsgType.QtWarningMsg: "avertissement Qt", QtMsgType.QtCriticalMsg: "erreur Qt",
+             QtMsgType.QtFatalMsg: "erreur fatale Qt"}
+    if mode != QtMsgType.QtDebugMsg:
+        log(f"{names.get(mode, 'Qt')} : {message}")
+    if sys.stderr is not None:
+        try:
+            sys.stderr.write(message + "\n")
+        except Exception:  # noqa
+            pass
+
+
+def _excepthook(etype, value, tb):
+    import traceback
+    text = "".join(traceback.format_exception(etype, value, tb))
+    log("ERREUR non gérée :\n" + text)
+    if sys.stderr is not None:
+        try:
+            sys.stderr.write(text)
+        except Exception:  # noqa
+            pass
+    if QApplication.instance() is not None:
+        try:
+            QMessageBox.critical(None, APP_NAME,
+                                 f"Erreur inattendue : {value}\n\nDétails enregistrés dans :\n"
+                                 f"{startup_log_path()}")
+        except Exception:  # noqa
+            pass
+
+
+def start_diagnostics():
+    """Journal, erreurs Python et Qt, et « chien de garde » : si la fenêtre n'est pas affichée
+    dans les 45 s, la pile d'appels de chaque fil est écrite dans le journal."""
+    import faulthandler
+    import platform
+    log_open()
+    log(f"=== Démarrage de {APP_NAME} {APP_VERSION} ({platform.platform()}, Python "
+        f"{platform.python_version()}, {'exécutable' if FROZEN else 'source'})")
+    log(f"arguments : {sys.argv[1:]} ; dossier courant : {os.getcwd()}")
+    env = {k: os.environ.get(k) for k in ("XDG_SESSION_TYPE", "WAYLAND_DISPLAY", "DISPLAY",
+                                           "QT_QPA_PLATFORM", "QT_PLUGIN_PATH", "QT_SCALE_FACTOR",
+                                           "LD_LIBRARY_PATH", "LANG", "CONDA_PREFIX")
+           if os.environ.get(k)}
+    log(f"environnement : {env}")
+    sys.excepthook = _excepthook
+    qInstallMessageHandler(_qt_message)
+    if _LOG is not None:
+        try:
+            faulthandler.enable(file=_LOG)
+            faulthandler.dump_traceback_later(45, file=_LOG)
+        except Exception:  # noqa
+            pass
+
+
+def diagnostics_ok():
+    import faulthandler
+    try:
+        faulthandler.cancel_dump_traceback_later()
+    except Exception:  # noqa
+        pass
+
+
+def _pid_alive(pid):
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        import ctypes
+        h = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)   # QUERY_LIMITED_INFORMATION
+        if not h:
+            return False
+        code = ctypes.c_ulong()
+        ctypes.windll.kernel32.GetExitCodeProcess(h, ctypes.byref(code))
+        ctypes.windll.kernel32.CloseHandle(h)
+        return code.value == 259   # STILL_ACTIVE
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def _stop_pid(pid):
+    """Arrête l'autre copie (bloquée) de l'application ; renvoie True si elle a disparu."""
+    import signal
+    import time
+    try:
+        os.kill(pid, signal.SIGTERM)    # Windows : TerminateProcess
+    except OSError:
+        pass
+    for _ in range(30):
+        if not _pid_alive(pid):
+            return True
+        time.sleep(0.1)
+    if os.name != "nt":
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+        for _ in range(20):
+            if not _pid_alive(pid):
+                return True
+            time.sleep(0.1)
+    return not _pid_alive(pid)
 
 
 def bundled_script():
@@ -1073,6 +1215,10 @@ class MainWindow(QMainWindow):
     def _start_inbox(self):
         self.inbox_watch = QFileSystemWatcher([inbox_dir()], self)
         self.inbox_watch.directoryChanged.connect(lambda *_: QTimer.singleShot(150, self._read_inbox))
+        # relecture régulière : certains systèmes de fichiers ne signalent pas les changements
+        self.inbox_timer = QTimer(self)
+        self.inbox_timer.timeout.connect(self._read_inbox)
+        self.inbox_timer.start(1500)
         self._read_inbox()
 
     def _read_inbox(self):
@@ -1093,9 +1239,26 @@ class MainWindow(QMainWindow):
             if url:
                 self.handle_url(url)
 
+    def ensure_on_screen(self):
+        """Ramène la fenêtre sur un écran si elle est hors de la zone visible (écran
+        débranché, géométrie enregistrée sur une autre configuration d'écrans…)."""
+        fr = self.frameGeometry()
+        screens = QGuiApplication.screens()
+        visible = 0
+        for sc in screens:
+            r = sc.availableGeometry().intersected(fr)
+            visible = max(visible, r.width() * r.height())
+        if screens and visible < min(fr.width() * fr.height(), 200 * 150):
+            ag = QGuiApplication.primaryScreen().availableGeometry()
+            log(f"fenêtre hors écran ({fr.x()},{fr.y()} {fr.width()}x{fr.height()}) : recentrée")
+            w, h = min(self.width(), ag.width() - 40), min(self.height(), ag.height() - 40)
+            self.resize(w, h)
+            self.move(ag.x() + (ag.width() - w) // 2, ag.y() + (ag.height() - h) // 2)
+
     def _bring_to_front(self):
         if self.isMinimized():
             self.showNormal()
+        self.ensure_on_screen()
         self.show()
         self.raise_()
         self.activateWindow()
@@ -2619,6 +2782,18 @@ def post_to_inbox(url):
     with open(name + ".tmp", "w", encoding="utf-8") as f:
         json.dump({"url": url}, f)
     os.replace(name + ".tmp", name)
+    return name
+
+
+def wait_consumed(paths, timeout):
+    """True si l'instance déjà ouverte a lu (et supprimé) toutes les demandes déposées."""
+    import time
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        if not any(os.path.exists(p) for p in paths):
+            return True
+        time.sleep(0.1)
+    return not any(os.path.exists(p) for p in paths)
 
 
 def parse_request(url):
@@ -2658,28 +2833,76 @@ class MacUrlFilter(QObject):
         return False
 
 
+def _other_instance(lock, urls):
+    """Une autre copie détient le verrou. Si elle répond, on lui transmet la demande et on
+    quitte ; si elle ne répond pas (copie bloquée, sans fenêtre), on propose de l'arrêter.
+    Renvoie l'application Qt créée pour la question, ou quitte le programme."""
+    info = lock.getLockInfo() or ()
+    pid = info[0] if len(info) >= 1 else 0
+    host = info[1] if len(info) >= 2 else ""
+    appname = info[2] if len(info) >= 3 else ""
+    log(f"une autre copie détient le verrou : processus {pid} ({appname}@{host})")
+    reqs = urls or [URL_SCHEME + "://show"]
+    posted = [post_to_inbox(u) for u in reqs]
+    if wait_consumed(posted, 5.0):
+        log("demande transmise à la copie ouverte : fin")
+        sys.exit(0)
+    for pth in posted:
+        try:
+            os.remove(pth)
+        except OSError:
+            pass
+    log("la copie ouverte ne répond pas")
+    app = QApplication(sys.argv)
+    # QLockFile a déjà vérifié que ce processus vit et porte le nom de notre programme
+    # (sinon le verrou aurait été considéré comme périmé et repris).
+    import socket
+    ours = _pid_alive(pid) and (not host or host == socket.gethostname())
+    if not ours:
+        # verrou orphelin (processus disparu, autre programme) : on le retire simplement
+        lock.removeStaleLockFile()
+    else:
+        r = QMessageBox.question(
+            None, APP_NAME,
+            f"PubMed Search est déjà ouvert (processus n° {pid}), mais cette copie ne répond "
+            "pas : aucune fenêtre n'apparaît.\n\nFermer la copie bloquée et ouvrir PubMed Search ?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+        if r != QMessageBox.Yes:
+            log("arrêt de la copie bloquée refusé : fin")
+            sys.exit(0)
+        stopped = _stop_pid(pid)
+        log(f"arrêt de la copie bloquée {pid} : {'réussi' if stopped else 'échec'}")
+        lock.removeStaleLockFile()
+    if not lock.tryLock(3000):
+        QMessageBox.critical(None, APP_NAME,
+                             "Impossible de fermer l'autre copie de PubMed Search.\n"
+                             "Redémarrez l'ordinateur, puis relancez l'application.\n\n"
+                             f"Journal : {startup_log_path()}")
+        sys.exit(1)
+    return app
+
+
 def main():
     QCoreApplication.setApplicationName(APP_ID)
     QCoreApplication.setOrganizationName("")
+    start_diagnostics()
     urls = urls_from_argv(sys.argv)
     # Instance unique : si l'application est déjà ouverte, on lui transmet la demande et on quitte.
     lock = QLockFile(os.path.join(config_dir(), "instance.lock"))
     lock.setStaleLockTime(0)
+    app = None
     if not lock.tryLock(200):
-        if urls:
-            for u in urls:
-                post_to_inbox(u)
-            sys.exit(0)
-        # lancement simple alors qu'une fenêtre existe : on la fait passer au premier plan
-        post_to_inbox(URL_SCHEME + "://show")
-        sys.exit(0)
+        app = _other_instance(lock, urls)
     if os.name == "nt":
         try:
             import ctypes
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_ID)
         except Exception:  # noqa
             pass
-    app = QApplication(sys.argv)
+    if app is None:
+        app = QApplication(sys.argv)
+    log(f"Qt : plateforme graphique « {app.platformName()} », "
+        f"{len(QGuiApplication.screens())} écran(s)")
     url_filter = MacUrlFilter()
     app.installEventFilter(url_filter)
     app.setApplicationName(APP_ID)
@@ -2692,12 +2915,21 @@ def main():
     app.setFont(f)
     app.setStyleSheet(stylesheet(ui, mono))
     win = MainWindow()
+    win.ensure_on_screen()
     win.show()
+    g = win.frameGeometry()
+
+    def shown():
+        diagnostics_ok()
+        log(f"fenêtre affichée : visible={win.isVisible()}, position {g.x()},{g.y()}, "
+            f"taille {g.width()}x{g.height()}")
+    QTimer.singleShot(0, shown)
     url_filter.win = win
     urls += url_filter.pending
     for u in urls:
         QTimer.singleShot(300, lambda u=u: win.handle_url(u))
     code = app.exec()
+    log(f"fermeture normale (code {code})")
     lock.unlock()
     sys.exit(code)
 

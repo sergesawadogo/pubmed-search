@@ -72,7 +72,7 @@ try:  # optionnel : lecture du texte des PDF (--import-pdf, contrôle API Elsevi
 except ImportError:
     PdfReader = None
 
-VERSION = "1.7.2"
+VERSION = "1.7.3"
 TOOL_NAME = "pubmed_search_py"
 DEFAULT_EMAIL = "sergesawadogo@gmail.com"
 
@@ -512,6 +512,33 @@ def elink_prlinks(http, articles):
 # --------------------------------------------------------------------------- #
 # Enrichissement : ID converter, Europe PMC, OpenAlex
 # --------------------------------------------------------------------------- #
+def elink_pmc_fill(http, articles):
+    """PMCID par E-utilities (ELink pubmed → pmc) : repli quand l'ID converter est refusé."""
+    todo = [a for a in articles if not a.pmcid]
+    found = 0
+    for batch in chunks(todo, 200):
+        try:
+            r = http.request("POST", EUTILS + "elink.fcgi", "ncbi",
+                             data=http.ncbi(dbfrom="pubmed", db="pmc", linkname="pubmed_pmc",
+                                            retmode="json", id=[a.pmid for a in batch]))
+            r.raise_for_status()
+            j = r.json()
+        except Exception as e:  # noqa
+            log(f"  ⚠ ELink pubmed→pmc : {type(e).__name__} {str(e)[:120]}")
+            continue
+        byid = {a.pmid: a for a in batch}
+        for ls in j.get("linksets", []):
+            ids = [str(i) for i in ls.get("ids", [])]
+            if len(ids) != 1 or ids[0] not in byid:
+                continue
+            for db in ls.get("linksetdbs", []):
+                if db.get("linkname") == "pubmed_pmc" and db.get("links"):
+                    byid[ids[0]].pmcid = f"PMC{db['links'][0]}"
+                    found += 1
+                    break
+    return found
+
+
 def idconv_fill(http, articles):
     todo = [a for a in articles if not a.pmcid or not a.doi]
     for batch in chunks(todo, 200):
@@ -522,7 +549,15 @@ def idconv_fill(http, articles):
             r.raise_for_status()
             recs = r.json().get("records", [])
         except Exception as e:  # noqa
-            log(f"  ⚠ ID converter PMC : {e}")
+            code = getattr(getattr(e, "response", None), "status_code", None)
+            if code in (403, 429):
+                # Refus du site PMC (protection anti-robots) : on passe par E-utilities, qui
+                # donne les mêmes PMCID ; les DOI viennent d'EFetch, Europe PMC et OpenAlex.
+                n = elink_pmc_fill(http, todo)
+                log(f"  ℹ ID converter PMC indisponible (HTTP {code}) : PMCID recherchés via "
+                    f"E-utilities à la place ({n} trouvé(s)).")
+                return
+            log(f"  ⚠ ID converter PMC : {type(e).__name__} {str(e)[:120]}")
             continue
         byid = {a.pmid: a for a in batch}
         for rec in recs:
@@ -986,6 +1021,17 @@ class Downloader:
     def from_core(self, a, p):
         """CORE (core.ac.uk) : copies des dépôts institutionnels, souvent mises en cache par CORE."""
         if not (a.doi or len(a.title) > 20):
+            return False
+        # Budget de temps : le quota gratuit de CORE (~10 req/min, souvent moins) peut à lui
+        # seul faire durer une recherche des dizaines de minutes pour un gain de 1 ou 2 PDF.
+        if not hasattr(self, "_core_t0"):
+            self._core_t0 = time.monotonic()
+        budget = getattr(self.http, "core_budget", 300)
+        if budget >= 0 and time.monotonic() - self._core_t0 > budget:
+            if not getattr(self, "_core_disabled", False):
+                self._core_disabled = True
+                log(f"ℹ API CORE : budget de {budget // 60:.0f} min atteint, CORE désactivé pour "
+                    "le reste de l'exécution (option --core-budget pour l'ajuster).")
             return False
         src = "CORE"
         q = f'doi:"{a.doi}"' if a.doi else f'title:"{a.title[:250]}"'
@@ -1973,6 +2019,9 @@ def build_parser():
     p.add_argument("--core-key", default=os.environ.get("CORE_API_KEY"),
                    help="clé API CORE gratuite (core.ac.uk/services/api, $CORE_API_KEY) : copies "
                         "des dépôts institutionnels")
+    p.add_argument("--core-budget", type=float, default=5,
+                   help="durée maximale (minutes) consacrée à CORE par exécution (défaut 5 ; "
+                        "-1 = sans limite). Le quota gratuit de CORE ralentit fortement les recherches")
     p.add_argument("--springer-oa-key", default=os.environ.get("SPRINGER_OA_API_KEY"),
                    help="clé Springer Nature Open Access API (dev.springernature.com, "
                         "$SPRINGER_OA_API_KEY) : texte intégral JATS -> JSON")
@@ -2038,6 +2087,7 @@ def main():
     http = Http(args.email, args.api_key, args.openalex_key, args.timeout, args.elsevier_key,
                 args.core_key, args.springer_oa_key, args.springer_meta_key, args.sources)
     http.elsevier_insttoken = args.elsevier_insttoken if args.elsevier_key else None
+    http.core_budget = -1 if args.core_budget < 0 else int(args.core_budget * 60)
     t0 = time.monotonic()
     log(f"pubmed_search.py v{VERSION} — {run_dt:%d/%m/%Y %Hh%M}")
     log(f"Requête : {args.query}")
@@ -2102,7 +2152,8 @@ def main():
                 "LinkOut" + (", OpenAlex" if args.openalex_key else "") + ")…")
             if args.core_key:
                 log("ℹ CORE activé : ~10 requêtes/min (limite de l'API), seulement pour les articles "
-                    "non trouvés par les autres sources.")
+                    "non trouvés par les autres sources"
+                    + (f", {args.core_budget:g} min au plus." if args.core_budget >= 0 else "."))
             idconv_fill(http, articles)
             europepmc_enrich(http, articles)
             if args.getfreepaper:
@@ -2168,6 +2219,7 @@ def main():
     n_free = sum(1 for a in articles if a.free in ("Free PMC article", "Free article"))
     n_free_pdf = sum(1 for a in articles if a.pdf_rel and a.free in ("Free PMC article", "Free article"))
     n_freelike = sum(1 for a in articles if a.free_like)
+    n_freelike_pdf = sum(1 for a in articles if a.free_like and a.pdf_rel)
     remaining = sum(1 for a in articles if a.free_like and not a.pdf_rel)
     pct = lambda x, y: f"{100 * x / y:.1f} %" if y else "n/a"  # noqa
 
@@ -2206,7 +2258,7 @@ def main():
         ("PDF téléchargés (total)", n_pdf),
         ("  dont articles 'Free' PubMed", n_free_pdf),
         ("Taux de réussite / articles 'Free' PubMed", pct(n_free_pdf, n_free)),
-        ("Taux de réussite / gratuits + OA détectés", pct(n_pdf, n_freelike)),
+        ("Taux de réussite / gratuits + OA détectés", pct(n_freelike_pdf, n_freelike)),
         ("Taux de réussite / tous les articles", pct(n_pdf, n)),
         ("Gratuits/OA restant à télécharger", remaining),
         ("PDF par source", src_detail),
@@ -2250,7 +2302,10 @@ def main():
         f"{free_cnt.get('Free article', 0)}")
     if args.getfreepaper:
         log(f"  Gratuits + OA détectés         : {n_freelike}")
-        log(f"  PDF téléchargés                : {n_pdf}  ({pct(n_pdf, n_freelike)} des gratuits/OA)")
+        extra = n_pdf - n_freelike_pdf
+        log(f"  PDF téléchargés                : {n_pdf}  ({pct(n_freelike_pdf, n_freelike)} des "
+            f"gratuits/OA" + (f" ; dont {extra} article(s) non signalé(s) gratuit(s)" if extra else "")
+            + ")")
         log(f"  Restant à télécharger          : {remaining}")
         log(f"  PDF par source                 : {src_detail or '-'}")
         log(f"  Passes effectuées              : {passes_done}")
