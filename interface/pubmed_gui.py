@@ -19,7 +19,7 @@ import threading
 
 APP_NAME = "PubMed Search"
 APP_ID = "pubmed-search-gui"
-APP_VERSION = "1.3.1"
+APP_VERSION = "1.4.0"
 
 
 # --------------------------------------------------------------------------- #
@@ -934,6 +934,7 @@ class MainWindow(QMainWindow):
         self.run_kind = None
         self.results_dir = ""
         self.excel_path = ""
+        self.word_path = ""
         self.script_flags = set()
         self.link_cursor = 0
         self._buf = ""
@@ -1832,6 +1833,42 @@ class MainWindow(QMainWindow):
         self.imp_btn.setMinimumHeight(44)
         self.imp_btn.clicked.connect(self._start_import)
         lay.addWidget(self.imp_btn)
+        lay.addSpacing(34)
+
+        # --- Identifier un dossier de PDF sans recherche préalable
+        lay.addWidget(section_title("Identifier un dossier de PDF (sans recherche)"))
+        lay.addWidget(hint("Pour n'importe quel dossier de PDF : chaque article est retrouvé dans PubMed "
+                           "(par son DOI, son PMID ou son titre ; sinon dans Crossref). Les PDF identifiés "
+                           "sont copiés et renommés PMID-Auteur(Année).pdf dans un nouveau dossier, avec un "
+                           "Excel des références et une bibliographie Word (style Vancouver). "
+                           "Les fichiers d'origine ne sont pas modifiés."))
+        lay.addSpacing(8)
+        self.idf_dir = QLineEdit()
+        self.idf_dir.setPlaceholderText("Dossier contenant les PDF")
+        b3 = QPushButton("Choisir…")
+        b3.setObjectName("secondary")
+        b3.clicked.connect(lambda: self._pick_dir(self.idf_dir, "Dossier de PDF à identifier"))
+        row3 = QHBoxLayout()
+        row3.setSpacing(6)
+        row3.addWidget(self.idf_dir, 1)
+        row3.addWidget(b3)
+        lay.addWidget(field_label("Dossier des PDF", self.idf_dir))
+        lay.addLayout(row3)
+        self.err_idf_dir = error_label()
+        lay.addWidget(self.err_idf_dir)
+        self.idf_name = QLineEdit()
+        self.idf_name.setPlaceholderText("Bibliographie")
+        lay.addWidget(field_label("Nom des résultats (Excel, Word, dossier)", self.idf_name))
+        lay.addWidget(self.idf_name)
+        lay.addWidget(hint("Résultats dans le dossier des PDF : Nom_JJ.MM.AAAA_HHhMM/ avec PDF_Nom/, "
+                           "Nom.xlsx et Nom.docx. Les PDF incertains vont dans PDF_Nom/A_verifier sans "
+                           "être renommés."))
+        lay.addSpacing(14)
+        self.idf_btn = QPushButton("Identifier et renommer les PDF")
+        self.idf_btn.setObjectName("primary")
+        self.idf_btn.setMinimumHeight(44)
+        self.idf_btn.clicked.connect(self._start_identify)
+        lay.addWidget(self.idf_btn)
         lay.addStretch(1)
         return w
 
@@ -2104,7 +2141,9 @@ class MainWindow(QMainWindow):
             b.setEnabled(False)
         self.open_dir_btn.clicked.connect(lambda: self._open_path(self.results_dir))
         self.open_xlsx_btn.clicked.connect(lambda: self._open_path(self.excel_path))
-        self.open_err_btn.clicked.connect(lambda: self._open_path(os.path.join(self.results_dir, "error.txt")))
+        self.open_err_btn.clicked.connect(lambda: self._open_path(
+            self.word_path if self.run_kind == "identify"
+            else os.path.join(self.results_dir, "error.txt")))
         copy = QPushButton("Copier")
         copy.setObjectName("onDark")
         copy.setToolTip("Copier tout le journal")
@@ -2171,7 +2210,7 @@ class MainWindow(QMainWindow):
             else:
                 missing = [f for f in ("--core-key", "--elsevier-key", "--openalex-key", "--import-pdf",
                                        "--time-set", "--getjson", "--sources", "--springer-oa-key",
-                                       "--springer-meta-key") if f not in flags]
+                                       "--springer-meta-key", "--identify-pdf") if f not in flags]
                 txt = f"Version {ver}, prête."
                 if missing:
                     txt += " Options absentes de cette version : " + ", ".join(missing) + "."
@@ -2187,6 +2226,7 @@ class MainWindow(QMainWindow):
             self.k_els.setEnabled("--elsevier-key" in flags)
             self.k_oa.setEnabled("--openalex-key" in flags)
             self.imp_btn.setEnabled("--import-pdf" in flags)
+            self.idf_btn.setEnabled("--identify-pdf" in flags)
             self.schedule.setEnabled("--time-set" in flags)
             probe.deleteLater()
 
@@ -2345,6 +2385,23 @@ class MainWindow(QMainWindow):
         self._save_settings()
         self._launch(script, args, "import")
 
+    def _start_identify(self):
+        script = self._validate_common()
+        if not script:
+            return
+        d = self.idf_dir.text().strip()
+        if not os.path.isdir(d) or not any(f.lower().endswith(".pdf") for f in os.listdir(d)):
+            self._set_error(self.err_idf_dir, "Choisissez un dossier qui contient des fichiers PDF.",
+                            self.idf_dir)
+            return
+        name = re.sub(r"[^A-Za-z0-9_\-]", "_", self.idf_name.text().strip()) or "Bibliographie"
+        args = ["--identify-pdf", d, "--output", name]
+        self.results_dir = ""
+        self.excel_path = ""
+        self.word_path = ""
+        self._save_settings()
+        self._launch(script, args, "identify")
+
     def _launch(self, script, args, kind):
         self.log.clear()
         self._log_lines = []
@@ -2372,9 +2429,12 @@ class MainWindow(QMainWindow):
         self.proc.errorOccurred.connect(self._proc_error)
         self.run_kind = kind
         self._set_state("En cours", "run")
-        self.phase.setText("Recherche dans PubMed…" if kind == "search" else "Import des PDF…")
+        self.phase.setText({"search": "Recherche dans PubMed…", "identify": "Identification des PDF…"}
+                           .get(kind, "Import des PDF…"))
+        self.open_err_btn.setText("Ouvrir le Word" if kind == "identify" else "Ouvrir error.txt")
         self.run_btn.setEnabled(False)
         self.imp_btn.setEnabled(False)
+        self.idf_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
         self.proc.start(prog, full)
         self._queue_buttons()
@@ -2438,9 +2498,25 @@ class MainWindow(QMainWindow):
             self._counts = {"total": int(m.group(2)), "ok": 0, "miss": 0}
             self.strip.set_values(int(m.group(2)), 0, 0)
             self.phase.setText(f"Passe {m.group(1)} : {m.group(2)} articles à traiter")
-        m = re.match(r"Dossier : (.+)$", line)
+        m = re.match(r"Dossier : (.+)$", line) or re.match(r"Résultats\s+: (.+)$", line)
         if m:
             self.results_dir = m.group(1).strip()
+        m = re.match(r"\s*Word\s+: (.+)$", line)
+        if m:
+            self.word_path = m.group(1).strip()
+        m = re.match(r"\s*\[(\d+)/(\d+)\] ([✔?=✖]) ", line)
+        if m and self.run_kind == "identify":
+            i, n, mark = int(m.group(1)), int(m.group(2)), m.group(3)
+            c = self._counts
+            c["total"] = n
+            c["ok" if mark == "✔" else "miss"] += 1
+            self.strip.set_values(n, c["ok"], c["miss"])
+            self.s_ok.set(c["ok"])
+            self.s_miss.set(c["miss"])
+            self.s_left.set(n - i)
+            self.s_rate.set(f"{100 * c['ok'] / i:.0f} %")
+            self.phase.setText(f"Identification : PDF {i} sur {n}")
+            kind = "pdf" if mark == "✔" else ("warn" if mark in "?=" else "nopdf")
         m = re.match(r"\s*Excel : (.+)$", line)
         if m:
             p = m.group(1).strip()
@@ -2492,7 +2568,8 @@ class MainWindow(QMainWindow):
             self._buf = ""
         if code == 0:
             self._set_state("Terminé", "ok")
-            self.phase.setText("Recherche terminée." if self.run_kind == "search" else "Import terminé.")
+            self.phase.setText({"search": "Recherche terminée.", "identify": "Identification terminée."}
+                               .get(self.run_kind, "Import terminé."))
         elif code == 130:
             self._set_state("Arrêté", "warn")
             self.phase.setText("Arrêtée : les résultats partiels ont été enregistrés.")
@@ -2501,7 +2578,8 @@ class MainWindow(QMainWindow):
             self.phase.setText(f"Le script s'est arrêté avec une erreur (code {code}). Voir le journal.")
         if self.results_dir and os.path.isdir(self.results_dir):
             self.open_dir_btn.setEnabled(True)
-            self.open_err_btn.setEnabled(os.path.exists(os.path.join(self.results_dir, "error.txt")))
+            self.open_err_btn.setEnabled(os.path.exists(self.word_path) if self.run_kind == "identify"
+                                         else os.path.exists(os.path.join(self.results_dir, "error.txt")))
             if not self.excel_path:
                 xs = [f for f in os.listdir(self.results_dir) if f.lower().endswith(".xlsx")]
                 self.excel_path = os.path.join(self.results_dir, xs[0]) if xs else ""
@@ -2515,6 +2593,7 @@ class MainWindow(QMainWindow):
         self._queue_buttons()
         self.run_btn.setEnabled(True)
         self.imp_btn.setEnabled("--import-pdf" in self.script_flags or not self.script_flags)
+        self.idf_btn.setEnabled("--identify-pdf" in self.script_flags or not self.script_flags)
         self.stop_btn.setEnabled(False)
 
     def _set_state(self, text, state):
@@ -2553,6 +2632,8 @@ class MainWindow(QMainWindow):
             "Recherches PubMed"))
         self.excel.setText(s.get("excel", ""))
         self.imp_pdfs.setText(s.get("import_pdfs", ""))
+        self.idf_dir.setText(s.get("identify_dir", ""))
+        self.idf_name.setText(s.get("identify_name", ""))
         self.remember_keys.setChecked(bool(s.get("remember_keys", False)))
         keys = s.get("keys", {}) if self.remember_keys.isChecked() else {}
         self.k_ncbi.setText(keys.get("ncbi", ""))
@@ -2591,6 +2672,8 @@ class MainWindow(QMainWindow):
             "outdir": self.outdir.text().strip(),
             "excel": self.excel.text().strip(),
             "import_pdfs": self.imp_pdfs.text().strip(),
+            "identify_dir": self.idf_dir.text().strip(),
+            "identify_name": self.idf_name.text().strip(),
             "remember_keys": self.remember_keys.isChecked(),
             "python_custom": self.py_custom.isChecked(),
             "python_path": self.py_path.text().strip(),

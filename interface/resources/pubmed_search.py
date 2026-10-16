@@ -72,7 +72,7 @@ try:  # optionnel : lecture du texte des PDF (--import-pdf, contrôle API Elsevi
 except ImportError:
     PdfReader = None
 
-VERSION = "1.7.3"
+VERSION = "1.8.0"
 TOOL_NAME = "pubmed_search_py"
 DEFAULT_EMAIL = "sergesawadogo@gmail.com"
 
@@ -176,6 +176,7 @@ class Http:
             "repository": 1.0,
             "bioc": 0.34,          # NCBI BioC (pas de limite publiée : 3 req/s par prudence)
             "springer": 1.0,       # forfait gratuit Springer Nature : quota journalier limité
+            "crossref": 0.2,       # API publique Crossref (« polite pool » avec mailto)
         }
 
         self.counts = Counter()
@@ -258,6 +259,11 @@ class Article:
         self.pmcid = ""
         self.title = ""
         self.journal = ""
+        self.journal_abbr = ""
+        self.volume = ""
+        self.issue = ""
+        self.month = ""
+        self.pages = ""
         self.year = ""
         self.pub_types = []
         self.authors = []          # [{"name","last","initials","emails"}]
@@ -412,6 +418,19 @@ def parse_pubmed_article(el):
     art = mc.find("Article")
     a.title = _txt(art.find("ArticleTitle")) or _txt(art.find("VernacularTitle"))
     a.journal = _txt(art.find("Journal/Title"))
+    # éléments de la référence bibliographique (style Vancouver / NLM)
+    a.journal_abbr = (mc.findtext("MedlineJournalInfo/MedlineTA") or
+                      art.findtext("Journal/ISOAbbreviation") or "").strip()
+    ji = art.find("Journal/JournalIssue")
+    a.volume = (ji.findtext("Volume") or "").strip() if ji is not None else ""
+    a.issue = (ji.findtext("Issue") or "").strip() if ji is not None else ""
+    a.month = (ji.findtext("PubDate/Month") or "").strip() if ji is not None else ""
+    a.pages = (art.findtext("Pagination/MedlinePgn") or "").strip()
+    if not a.pages:
+        for eloc in art.findall("ELocationID"):
+            if (eloc.get("EIdType") or "").lower() == "pii":
+                a.pages = (eloc.text or "").strip()
+                break
     a.year = _year_of(art.find("Journal/JournalIssue")) or _year_of(art) or _year_of(el)
     a.pub_types = [_txt(p) for p in art.findall("PublicationTypeList/PublicationType")]
     a.authors = _parse_authors(art.findall("AuthorList/Author"))
@@ -452,7 +471,7 @@ def parse_book_article(el):
     return a
 
 
-def efetch_articles(http, pmids):
+def efetch_articles(http, pmids, quiet=False):
     out = {}
     for batch in chunks(pmids, 200):
         r = http.request("POST", EUTILS + "efetch.fcgi", "ncbi",
@@ -471,7 +490,8 @@ def efetch_articles(http, pmids):
                 out[a.pmid] = a
             except Exception as e:  # noqa
                 log(f"  ⚠ Erreur d'analyse XML (livre) : {e}")
-        log(f"  métadonnées : {len(out)}/{len(pmids)}")
+        if not quiet:
+            log(f"  métadonnées : {len(out)}/{len(pmids)}")
     return out
 
 
@@ -1761,6 +1781,593 @@ def write_error_file(path, articles, meta_lines, getfree, tips=()):
 
 
 # --------------------------------------------------------------------------- #
+# Mode identification : dossier de PDF quelconque -> PDF renommés, Excel, Word
+# (« recherche inversée » : on part du PDF pour retrouver la notice PubMed)
+# --------------------------------------------------------------------------- #
+CROSSREF = "https://api.crossref.org/works"
+DOI_RE = re.compile(r"\b(10\.\d{4,9}/[^\s\"<>{}|\\^`]+)", re.I)
+PMID_TXT_RE = re.compile(r"\bPMID\s*:?\s*(\d{6,9})\b", re.I)
+MONTHS = {str(i): m for i, m in enumerate(
+    ["", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"])}
+BAD_TITLES = ("untitled", "microsoft word", "document", "article", "pdf", "manuscript", "title")
+
+
+def _clean_doi(d):
+    d = unquote(d or "").strip().rstrip(".,;:)]}>'\"")
+    d = re.sub(r"(\.pdf|\.full|/full|/abstract|/epdf|/pdf)$", "", d, flags=re.I)
+    if d.count("(") < d.count(")"):          # parenthèse fermante collée au DOI
+        d = d[:d.rfind(")")]
+    return d
+
+
+def _words(s):
+    return [w for w in re.findall(r"[a-z0-9]+", unicodedata.normalize("NFKD", s or "")
+                                  .encode("ascii", "ignore").decode().lower()) if len(w) > 3]
+
+
+def _containment(title, text):
+    """Part des mots significatifs du titre présents dans le texte du PDF (0 à 1)."""
+    tw = _words(title)
+    if not tw:
+        return 0.0
+    txt = set(_words(text))
+    return sum(1 for w in tw if w in txt) / len(tw)
+
+
+def _similar(a, b):
+    na, nb = " ".join(_words(a)), " ".join(_words(b))
+    if not (na and nb):
+        return 0.0
+    try:
+        import difflib
+        return difflib.SequenceMatcher(None, na, nb).ratio()
+    except ImportError:   # Python intégré d'une ancienne version de l'application
+        wa, wb = set(na.split()), set(nb.split())
+        return 2 * len(wa & wb) / (len(wa) + len(wb))
+
+
+class PdfInfo:
+    """Ce qu'on peut lire d'un PDF sans réseau : texte, métadonnées, titre probable."""
+
+    def __init__(self, path):
+        self.path = path
+        self.name = os.path.basename(path)
+        self.text1 = ""        # page 1
+        self.text = ""         # pages 1-2
+        self.meta_doi = ""
+        self.meta_title = ""
+        self.big_title = ""    # texte en plus gros caractères de la page 1
+        self.error = ""
+        if PdfReader is None:
+            self.error = "module pypdf absent"
+            return
+        try:
+            r = PdfReader(path)
+            if r.is_encrypted:
+                try:
+                    r.decrypt("")
+                except Exception:  # noqa
+                    self.error = "PDF protégé par mot de passe"
+                    return
+            pages = r.pages[:2]
+            frags = []
+
+            def visit(t, cm, tm, font, size):
+                if t and t.strip():
+                    sc = max(abs(tm[0]), abs(tm[3]), 1e-6) * max(abs(cm[0]), abs(cm[3]), 1e-6)
+                    frags.append((round((size or 0) * sc, 1), t))
+            if pages:
+                try:
+                    self.text1 = pages[0].extract_text(visitor_text=visit) or ""
+                except Exception:  # noqa
+                    self.text1 = pages[0].extract_text() or ""
+            self.text = self.text1 + " " + " ".join((pg.extract_text() or "") for pg in pages[1:])
+            # titre = fragments de la plus grande taille (hors lettrines d'un caractère)
+            sizes = sorted({sz for sz, t in frags if len(t.strip()) > 3}, reverse=True)
+            for sz in sizes[:3]:
+                cand = re.sub(r"\s+", " ", " ".join(t for s2, t in frags if abs(s2 - sz) < 0.6)).strip()
+                if 20 <= len(cand) <= 350 and len(cand.split()) >= 4:
+                    self.big_title = cand
+                    break
+            md = r.metadata or {}
+            raw = " ".join(str(v) for v in md.values() if v)
+            try:
+                if r.xmp_metadata is not None:
+                    raw += " " + r.xmp_metadata.stream.get_data().decode("utf-8", "ignore")
+            except Exception:  # noqa
+                pass
+            m = DOI_RE.search(raw)
+            if m:
+                self.meta_doi = _clean_doi(m.group(1))
+            t = str(md.get("/Title") or "").strip()
+            if len(t) >= 20 and not t.lower().startswith(BAD_TITLES) and not t.lower().endswith(
+                    (".doc", ".docx", ".pdf", ".tex", ".indd")):
+                self.meta_title = t
+        except Exception as e:  # noqa
+            self.error = f"PDF illisible ({type(e).__name__})"
+
+    def filename_doi(self):
+        fname = unquote(self.name)
+        if re.match(r"10\.\d{4,9}_", fname):        # « 10.1000_xyz.pdf » : / remplacé par _
+            fname = fname.replace("_", "/", 1)
+        m = DOI_RE.search(fname)
+        return _clean_doi(re.sub(r"\.pdf$", "", m.group(1), flags=re.I)) if m else ""
+
+    def doi_candidates(self):
+        """DOI dans l'ordre de confiance : nom du fichier, métadonnées, page 1 (près du
+        mot « doi »), puis pages 1-2."""
+        out = []
+
+        def add(d):
+            d = _clean_doi(d)
+            if d and d.lower() not in [x.lower() for x in out]:
+                out.append(d)
+        if self.filename_doi():
+            add(self.filename_doi())
+        if self.meta_doi:
+            add(self.meta_doi)
+        flat = re.sub(r"\s+", " ", self.text1)
+        for m in re.finditer(r"(?:doi(?:\.org)?\s*[:/]?\s*|dx\.doi\.org/)(10\.\d{4,9}/\S+)", flat, re.I):
+            add(m.group(1))
+        for m in DOI_RE.finditer(flat):
+            add(m.group(1))
+        for m in DOI_RE.finditer(re.sub(r"\s+", " ", self.text)):
+            add(m.group(1))
+        return out[:8]
+
+    def pmid_candidates(self):
+        out = []
+        m = re.match(r"^(?:PMID[\s_-]*)?(\d{6,9})(?=[-_\s(.])", self.name, re.I)
+        if m:
+            out.append(m.group(1))
+        out += [x for x in PMID_TXT_RE.findall(self.text1) if x not in out]
+        return out
+
+    def title_candidates(self):
+        return [t for t in (self.big_title, self.meta_title) if t]
+
+
+def _crossref_article(item):
+    """Notice Crossref -> Article (sans PMID)."""
+    a = Article("")
+    a.doi = item.get("DOI", "")
+    a.title = re.sub(r"<[^>]+>", "", " ".join(item.get("title") or [])).strip()
+    a.journal = " ".join(item.get("container-title") or [])
+    a.journal_abbr = " ".join(item.get("short-container-title") or []) or a.journal
+    parts = ((item.get("issued") or item.get("published-print") or item.get("published-online")
+              or {}).get("date-parts") or [[None]])[0]
+    a.year = str(parts[0]) if parts and parts[0] else ""
+    a.month = MONTHS.get(str(parts[1]), "") if len(parts) > 1 and parts[1] else ""
+    a.volume = item.get("volume", "")
+    a.issue = item.get("issue", "")
+    a.pages = item.get("page", "") or item.get("article-number", "")
+    a.pub_types = [item.get("type", "")] if item.get("type") else []
+    for au in item.get("author") or []:
+        last = au.get("family") or au.get("name") or ""
+        given = au.get("given") or ""
+        ini = "".join(p[0] for p in re.split(r"[\s\-.]+", given) if p and p[0].isalpha()).upper()
+        if last:
+            a.authors.append({"name": f"{last} {ini}".strip(), "last": last, "initials": ini,
+                              "emails": []})
+    return a
+
+
+class Identifier:
+    def __init__(self, http):
+        self.http = http
+        self.cache = {}
+
+    # -- PubMed -------------------------------------------------------------- #
+    def pubmed_record(self, pmid):
+        if pmid not in self.cache:
+            try:
+                self.cache[pmid] = efetch_articles(self.http, [pmid], quiet=True).get(pmid)
+            except Exception:  # noqa
+                self.cache[pmid] = None
+        return self.cache[pmid]
+
+    def pmid_for_doi(self, doi):
+        try:
+            _, ids, _ = esearch(self.http, f'"{doi}"[aid]', "relevance", 3)
+        except Exception:  # noqa
+            return None
+        return ids[0] if len(ids) == 1 else None
+
+    def pubmed_by_title(self, title):
+        words = [w for w in re.findall(r"[A-Za-z0-9]+", title) if len(w) > 3][:12]
+        if len(words) < 3:
+            return None, 0.0
+        try:
+            _, ids, _ = esearch(self.http, " AND ".join(f"{w}[ti]" for w in words), "relevance", 5)
+        except Exception:  # noqa
+            return None, 0.0
+        if not ids:
+            return None, 0.0
+        try:
+            recs = efetch_articles(self.http, ids, quiet=True)
+        except Exception:  # noqa
+            return None, 0.0
+        best, score = None, 0.0
+        for rec in recs.values():
+            sc = _similar(title, rec.title)
+            if sc > score:
+                best, score = rec, sc
+        if best is not None:
+            self.cache[best.pmid] = best
+        return best, score
+
+    # -- Crossref ------------------------------------------------------------ #
+    def crossref_doi(self, doi):
+        try:
+            r = self.http.request("GET", f"{CROSSREF}/{quote(doi, safe='/')}", "crossref", retries=1,
+                                  params={"mailto": self.http.email})
+            if r.status_code != 200:
+                return None
+            return _crossref_article(r.json().get("message") or {})
+        except Exception:  # noqa
+            return None
+
+    def crossref_title(self, title):
+        try:
+            r = self.http.request("GET", CROSSREF, "crossref", retries=1,
+                                  params={"query.bibliographic": title[:300], "rows": 3,
+                                          "mailto": self.http.email})
+            if r.status_code != 200:
+                return None, 0.0
+            items = (r.json().get("message") or {}).get("items") or []
+        except Exception:  # noqa
+            return None, 0.0
+        best, score = None, 0.0
+        for it in items:
+            a = _crossref_article(it)
+            sc = _similar(title, a.title)
+            if sc > score:
+                best, score = a, sc
+        return best, score
+
+    # -- un PDF ---------------------------------------------------------------- #
+    def identify(self, info):
+        """Renvoie (article ou None, méthode, fiabilité 'sûre'/'à vérifier', remarque)."""
+        has_text = len(_words(info.text)) >= 30
+        fname_doi = info.filename_doi()
+        # 1. PMID explicite (nom du fichier ou « PMID: » imprimé)
+        for pmid in info.pmid_candidates():
+            rec = self.pubmed_record(pmid)
+            if rec and (not has_text or _containment(rec.title, info.text) >= 0.6):
+                return rec, "PMID (nom du fichier ou texte)", "sûre", ""
+        # 2. DOI (nom, métadonnées, texte) -> PubMed, sinon Crossref
+        doubtful = None
+        for doi in info.doi_candidates():
+            pmid = self.pmid_for_doi(doi)
+            rec = self.pubmed_record(pmid) if pmid else None
+            src = "DOI → PubMed"
+            if rec is None:
+                rec = self.crossref_doi(doi)
+                src = "DOI → Crossref (absent de PubMed)"
+            if rec is None:
+                continue
+            cont = _containment(rec.title, info.text) if has_text else None
+            if cont is None and fname_doi and doi.lower() == fname_doi.lower():
+                return rec, src + " (DOI du nom de fichier)", "sûre", ""
+            if cont is None or cont >= 0.6:
+                note = "" if cont is not None else "texte du PDF illisible : titre non vérifié"
+                return rec, src, "sûre" if cont is not None else "à vérifier", note
+            if cont >= 0.3 and doubtful is None:
+                doubtful = (rec, src, "à vérifier",
+                            f"titre retrouvé à {cont:.0%} dans le PDF (DOI peut-être celui "
+                            "d'une référence citée)")
+        # 3. titre -> PubMed, puis Crossref
+        for title in info.title_candidates():
+            rec, sc = self.pubmed_by_title(title)
+            if rec is not None and sc >= 0.90:
+                return rec, "Titre → PubMed", "sûre", ""
+            if rec is not None and sc >= 0.75 and doubtful is None:
+                doubtful = (rec, "Titre → PubMed", "à vérifier", f"titre proche à {sc:.0%}")
+            rec, sc = self.crossref_title(title)
+            if rec is not None and sc >= 0.90:
+                pmid = self.pmid_for_doi(rec.doi) if rec.doi else None
+                prec = self.pubmed_record(pmid) if pmid else None
+                if prec:
+                    return prec, "Titre → Crossref → PubMed", "sûre", ""
+                return rec, "Titre → Crossref (absent de PubMed)", "sûre", ""
+            if rec is not None and sc >= 0.75 and doubtful is None:
+                doubtful = (rec, "Titre → Crossref", "à vérifier", f"titre proche à {sc:.0%}")
+        if doubtful:
+            return doubtful
+        if info.error:
+            return None, "", "", info.error
+        if not has_text:
+            return None, "", "", ("pas de texte lisible (PDF scanné ?) ni de DOI dans le nom ou les "
+                                  "propriétés du fichier")
+        return None, "", "", "ni DOI, ni PMID, ni titre retrouvé dans PubMed ou Crossref"
+
+
+def ident_filename(a):
+    """Nom du PDF : PMID-Auteur_Initiales(Année).pdf, ou NoPMID-… hors PubMed."""
+    name = a.pdf_filename()
+    if not a.pmid:
+        name = "NoPMID" + name
+    return name
+
+
+def vancouver(a):
+    """Référence au style Vancouver (NLM, Citing Medicine) : 6 auteurs puis et al."""
+    au = [x["name"] for x in a.authors]
+    if len(au) > 6:
+        authors = ", ".join(au[:6]) + ", et al."
+    elif au:
+        authors = ", ".join(au) + "."
+    else:
+        authors = ""
+    title = (a.title or "").strip()
+    if title and title[-1] not in ".?!":
+        title += "."
+    jour = (a.journal_abbr or a.journal or "").strip()
+    mon = MONTHS.get(a.month.lstrip("0"), a.month) if a.month else ""
+    date = " ".join(x for x in (a.year, mon) if x)
+    loc = ""
+    if a.volume:
+        loc += a.volume
+    if a.issue:
+        loc += f"({a.issue})"
+    if a.pages:
+        loc += f":{a.pages}"
+    src = f"{jour}. " if jour else ""
+    src += date + (f";{loc}" if loc else "") + "."
+    ids = []
+    if a.doi:
+        ids.append(f"doi:{a.doi}.")
+    pm = []
+    if a.pmid:
+        pm.append(f"PMID: {a.pmid}")
+    if a.pmcid:
+        pm.append(f"PMCID: {a.pmcid}")
+    if pm:
+        ids.append("; ".join(pm) + ".")
+    return " ".join(x for x in (authors, title, src, " ".join(ids)) if x)
+
+
+def _xml_esc(s):
+    return (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def write_docx(path, title, subtitle, refs):
+    """Document Word minimal (WordprocessingML) sans dépendance : titre, sous-titre et
+    références numérotées avec retrait suspendu."""
+    import zipfile
+    W = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
+
+    def para(text, style=None, num=None):
+        ppr = f'<w:pStyle w:val="{style}"/>' if style else ""
+        if num is not None:
+            ppr += ('<w:tabs><w:tab w:val="left" w:pos="567"/></w:tabs>'
+                    '<w:spacing w:after="120"/><w:ind w:left="567" w:hanging="567"/>')
+            runs = f'<w:r><w:t>{num}.</w:t></w:r><w:r><w:tab/></w:r>'
+        else:
+            runs = ""
+        runs += f'<w:r><w:t xml:space="preserve">{_xml_esc(text)}</w:t></w:r>'
+        return f"<w:p><w:pPr>{ppr}</w:pPr>{runs}</w:p>"
+    body = para(title, "Title") + para(subtitle, "Subtitle")
+    body += "".join(para(r, num=i) for i, r in enumerate(refs, 1))
+    doc = (f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document {W}><w:body>{body}'
+           '<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1418" w:right="1418" '
+           'w:bottom="1418" w:left="1418" w:header="709" w:footer="709" w:gutter="0"/></w:sectPr>'
+           '</w:body></w:document>')
+    styles = (f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:styles {W}>'
+              '<w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri" '
+              'w:cs="Calibri" w:eastAsia="Calibri"/><w:sz w:val="22"/><w:lang w:val="fr-FR"/></w:rPr>'
+              '</w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:after="80" w:line="264" '
+              'w:lineRule="auto"/></w:pPr></w:pPrDefault></w:docDefaults>'
+              '<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>'
+              '<w:style w:type="paragraph" w:styleId="Title"><w:name w:val="Title"/><w:basedOn w:val="Normal"/>'
+              '<w:pPr><w:spacing w:after="60"/></w:pPr><w:rPr><w:b/><w:sz w:val="36"/></w:rPr></w:style>'
+              '<w:style w:type="paragraph" w:styleId="Subtitle"><w:name w:val="Subtitle"/>'
+              '<w:basedOn w:val="Normal"/><w:pPr><w:spacing w:after="240"/></w:pPr>'
+              '<w:rPr><w:color w:val="595959"/><w:sz w:val="20"/></w:rPr></w:style></w:styles>')
+    ctypes = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types '
+              'xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+              '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+              '<Default Extension="xml" ContentType="application/xml"/>'
+              '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-'
+              'officedocument.wordprocessingml.document.main+xml"/>'
+              '<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-'
+              'officedocument.wordprocessingml.styles+xml"/></Types>')
+    rels = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships '
+            'xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/'
+            'relationships/officeDocument" Target="word/document.xml"/></Relationships>')
+    drels = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships '
+             'xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+             '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/'
+             'relationships/styles" Target="styles.xml"/></Relationships>')
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("[Content_Types].xml", ctypes)
+        z.writestr("_rels/.rels", rels)
+        z.writestr("word/document.xml", doc)
+        z.writestr("word/styles.xml", styles)
+        z.writestr("word/_rels/document.xml.rels", drels)
+
+
+def _sort_key(a):
+    last = a.authors[0]["last"] if a.authors else (a.title or "")
+    last = unicodedata.normalize("NFKD", last).encode("ascii", "ignore").decode().lower()
+    return (last, a.year or "9999", (a.title or "").lower())
+
+
+def run_identify(src_dir, output, outdir, http):
+    t0 = time.monotonic()
+    src_dir = os.path.abspath(os.path.expanduser(src_dir))
+    if not os.path.isdir(src_dir):
+        sys.exit(f"Dossier introuvable : {src_dir}")
+    stem = ascii_slug(os.path.splitext(os.path.basename(output or "Bibliographie"))[0],
+                      keep=r"A-Za-z0-9_\-") or "Bibliographie"
+    now = dt.datetime.now()
+    base = os.path.abspath(os.path.expanduser(outdir)) if outdir else src_dir
+    folder = os.path.join(base, f"{stem}_{now:%d.%m.%Y_%Hh%M}")
+    k = 2
+    while os.path.exists(folder):
+        folder = os.path.join(base, f"{stem}_{now:%d.%m.%Y_%Hh%M}_{k}")
+        k += 1
+    pdf_dirname = f"PDF_{stem}"
+    pdf_dir = os.path.join(folder, pdf_dirname)
+    check_dir = os.path.join(pdf_dir, "A_verifier")
+    pdfs = sorted(p for p in glob.glob(os.path.join(src_dir, "*"))
+                  if p.lower().endswith(".pdf") and os.path.isfile(p))
+    log(f"pubmed_search.py v{VERSION} — identification de PDF — {now:%d/%m/%Y %Hh%M}")
+    log(f"Dossier analysé : {src_dir}  ({len(pdfs)} PDF)")
+    log(f"Résultats       : {folder}")
+    if not pdfs:
+        sys.exit("Aucun fichier PDF dans ce dossier.")
+    if PdfReader is None:
+        log("⚠ Module 'pypdf' absent : seuls les DOI/PMID présents dans les noms de fichiers "
+            "seront utilisés.")
+    os.makedirs(pdf_dir, exist_ok=True)
+    ident = Identifier(http)
+    rows = []          # (fichier, article|None, méthode, fiabilité, remarque, nouveau nom rel)
+    seen = {}
+    for i, path in enumerate(pdfs, 1):
+        if STOP.is_set():
+            log("⛔ Interruption : écriture des résultats partiels…")
+            break
+        try:
+            info = PdfInfo(path)
+            a, how, conf, note = ident.identify(info)
+        except KeyboardInterrupt:
+            log("⛔ Interruption : écriture des résultats partiels…")
+            break
+        rel = ""
+        if a is not None:
+            key = a.pmid or (a.doi or "").lower()
+            if key and key in seen:
+                note = f"doublon de « {seen[key]} » : non copié"
+                conf = "doublon"
+            elif conf == "sûre":
+                seen[key] = info.name
+                new = ident_filename(a)
+                dest = os.path.join(pdf_dir, new)
+                n = 2
+                while os.path.exists(dest):
+                    dest = os.path.join(pdf_dir, new[:-4] + f"_{n}.pdf")
+                    n += 1
+                shutil.copy2(path, dest)
+                rel = f"{pdf_dirname}/{os.path.basename(dest)}"
+            else:
+                os.makedirs(check_dir, exist_ok=True)
+                dest = os.path.join(check_dir, info.name)
+                shutil.copy2(path, dest)
+                rel = f"{pdf_dirname}/A_verifier/{info.name}"
+        tag = (f"{a.pmid or 'NoPMID'} {a.first_author} ({a.year})" if a else "non identifié")
+        mark = {"sûre": "✔", "à vérifier": "?", "doublon": "="}.get(conf, "✖")
+        log(f"  [{i}/{len(pdfs)}] {mark} {info.name} → {tag}"
+            + (f" — {how}" if how else "") + (f" ({note})" if note else ""))
+        rows.append((info.name, a, how, conf, note, rel))
+
+    sure = [r for r in rows if r[3] == "sûre"]
+    refs = sorted((r[1] for r in sure), key=_sort_key)
+    num = {id(a): i for i, a in enumerate(refs, 1)}
+
+    # ---- Excel ----
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Références"
+    hfill = PatternFill("solid", fgColor="1F4E78")
+    headers = ["N° biblio", "Fichier d'origine", "PDF renommé (lien local)", "Identification",
+               "Fiabilité", "PMID", "DOI", "PMCID", "Titre", "Journal", "Année", "Volume",
+               "Numéro", "Pages", "Type", "1er auteur", "Dernier auteur", "Autres auteurs",
+               "Référence (Vancouver)", "Remarque"]
+    ws.append(headers)
+    for c in ws[1]:
+        c.font = Font(bold=True, color="FFFFFF")
+        c.fill = hfill
+        c.alignment = Alignment(vertical="center", wrap_text=True)
+    order = sorted(rows, key=lambda r: (num.get(id(r[1]), 10 ** 6), r[0].lower()))
+    for fname, a, how, conf, note, rel in order:
+        if a is None:
+            ws.append([clean_xl(v) for v in ["", fname, "non identifié", "", "", "", "", "", "", "",
+                                             "", "", "", "", "", "", "", "", "", note]])
+            ws.cell(ws.max_row, 3).font = Font(color="C00000")
+            continue
+        ws.append([clean_xl(v) for v in [
+            num.get(id(a), ""), fname, rel or "-", how, conf, a.pmid or "NoPMID", a.doi, a.pmcid,
+            a.title, a.journal, a.year, a.volume, a.issue, a.pages, "; ".join(a.pub_types),
+            a.first_author, a.last_author, a.other_authors, vancouver(a), note]])
+        r = ws.max_row
+        if rel:
+            ws.cell(r, 3).hyperlink = rel
+            ws.cell(r, 3).font = Font(color="0563C1", underline="single")
+        if a.pmid:
+            ws.cell(r, 6).hyperlink = f"https://pubmed.ncbi.nlm.nih.gov/{a.pmid}/"
+            ws.cell(r, 6).font = Font(color="0563C1", underline="single")
+        if a.doi:
+            ws.cell(r, 7).hyperlink = "https://doi.org/" + a.doi
+            ws.cell(r, 7).font = Font(color="0563C1", underline="single")
+        if conf != "sûre":
+            ws.cell(r, 5).font = Font(bold=True, color="B26A00")
+    for i, w in enumerate([9, 40, 44, 26, 11, 11, 26, 12, 60, 30, 7, 8, 8, 12, 22, 18, 18, 36, 90, 40], 1):
+        ws.column_dimensions[get_column_letter(i)].width = w
+    ws.freeze_panes = "C2"
+    ws.auto_filter.ref = ws.dimensions
+    n_sure, n_check = len(sure), sum(1 for r in rows if r[3] == "à vérifier")
+    n_dup = sum(1 for r in rows if r[3] == "doublon")
+    n_none = sum(1 for r in rows if r[1] is None)
+    n_nopmid = sum(1 for r in sure if not r[1].pmid)
+    ws2 = wb.create_sheet("Résumé")
+    ws2.append(["Paramètre", "Valeur"])
+    for c in ws2[1]:
+        c.font = Font(bold=True, color="FFFFFF")
+        c.fill = hfill
+    meth = Counter(r[2] for r in sure)
+    for k2, v in [("Dossier analysé", src_dir), ("Date", f"{now:%d/%m/%Y %H:%M}"),
+                  ("PDF analysés", len(rows)), ("Identifiés (renommés)", n_sure),
+                  ("  dont absents de PubMed (NoPMID)", n_nopmid),
+                  ("À vérifier (copiés dans A_verifier, non renommés)", n_check),
+                  ("Doublons (non copiés)", n_dup), ("Non identifiés", n_none),
+                  ("Méthodes d'identification", ", ".join(f"{m2}: {c2}" for m2, c2 in meth.most_common())),
+                  ("Style bibliographique", "Vancouver (NLM), ordre alphabétique du 1er auteur"),
+                  ("Durée", fmt_duration(time.monotonic() - t0)),
+                  ("Requêtes", f"{http.total} ({', '.join(f'{k3}: {v3}' for k3, v3 in http.counts.most_common())})"),
+                  ("Script", f"pubmed_search.py v{VERSION}")]:
+        ws2.append([clean_xl(k2), clean_xl(v)])
+    ws2.column_dimensions["A"].width = 50
+    ws2.column_dimensions["B"].width = 90
+    xlsx = os.path.join(folder, f"{stem}.xlsx")
+    wb.save(xlsx)
+
+    # ---- Word ----
+    docx = os.path.join(folder, f"{stem}.docx")
+    write_docx(docx, "Bibliographie",
+               f"{len(refs)} référence(s) — style Vancouver — {now:%d/%m/%Y} — dossier : {src_dir}",
+               [vancouver(a) for a in refs])
+
+    # ---- non identifiés / à vérifier ----
+    todo = [r for r in rows if r[3] != "sûre"]
+    if todo:
+        with open(os.path.join(folder, "a_verifier.txt"), "w", encoding="utf-8") as f:
+            f.write(f"PDF non renommés — {now:%d/%m/%Y %H:%M}\n"
+                    "Pour un PDF non identifié : renommez l'original avec son PMID ou son DOI "
+                    "(ex. 12345678.pdf ou 10.1000_xyz.pdf) puis relancez l'identification.\n\n")
+            for fname, a, how, conf, note, rel in todo:
+                prop = f" | proposition : {vancouver(a)}" if a is not None else ""
+                f.write(f"[{conf or 'non identifié'}] {fname} — {note}{prop}\n")
+
+    log("\n" + "=" * 60)
+    log("📈 IDENTIFICATION")
+    log("=" * 60)
+    log(f"  PDF analysés            : {len(rows)}")
+    log(f"  Identifiés et renommés  : {n_sure}" + (f"  (dont {n_nopmid} hors PubMed : NoPMID)" if n_nopmid else ""))
+    log(f"  À vérifier              : {n_check}")
+    log(f"  Doublons                : {n_dup}")
+    log(f"  Non identifiés          : {n_none}")
+    log(f"  Durée                   : {fmt_duration(time.monotonic() - t0)}")
+    log(f"  Requêtes HTTP           : {http.total}")
+    log(f"\n  Excel : {xlsx}")
+    log(f"  Word  : {docx}")
+    if todo:
+        log(f"  Liste à vérifier : {os.path.join(folder, 'a_verifier.txt')}")
+    return 0
+
+
+# --------------------------------------------------------------------------- #
 # Programme principal
 # --------------------------------------------------------------------------- #
 SECRET_FLAGS = ("--api-key", "--openalex-key", "--elsevier-key", "--core-key", "--springer-oa-key",
@@ -2036,7 +2643,14 @@ def build_parser():
                         "(ex. NETosis_pneumococcal_01.10.2026_18h46)")
     p.add_argument("--move", action="store_true",
                    help="avec --import-pdf : déplacer les PDF au lieu de les copier")
-    p.add_argument("--outdir", default=".", help="dossier parent des résultats (défaut : courant)")
+    p.add_argument("--outdir", default=None,
+                   help="dossier parent des résultats (défaut : dossier courant ; avec "
+                        "--identify-pdf : le dossier des PDF)")
+    p.add_argument("--identify-pdf", metavar="DOSSIER",
+                   help="identifier les PDF d'un dossier quelconque (DOI, PMID ou titre -> PubMed, "
+                        "sinon Crossref) : copies renommées PMID-Auteur(Année).pdf, Excel des "
+                        "références et bibliographie Word (Vancouver). Nom avec --output "
+                        "(défaut Bibliographie)")
     p.add_argument("--workers", type=int, default=4, help="téléchargements parallèles (défaut 4)")
     p.add_argument("--timeout", type=int, default=40, help="délai max par requête en s (défaut 40)")
     return p
@@ -2053,6 +2667,10 @@ def main():
         if not args.results:
             parser.error("--import-pdf nécessite --results DOSSIER_RESULTATS")
         return run_import(args.import_pdf, args.results, move=args.move)
+    if args.identify_pdf:
+        http = Http(args.email, args.api_key, timeout=args.timeout)
+        return run_identify(args.identify_pdf, args.output, args.outdir, http)
+    args.outdir = args.outdir or "."
     if not args.query or not args.output:
         parser.error("une recherche nécessite la requête et --output")
     if not args.output.lower().endswith(".xlsx"):

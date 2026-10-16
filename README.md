@@ -13,10 +13,10 @@ Page des téléchargements : **[Dernière version](https://github.com/sergesawad
 
 | Fichier | Pour |
 |---|---|
-| `PubMedSearch-Setup-1.3.1.exe` | Windows 10 et 11 (64 bits) |
-| `PubMedSearch-1.3.1-macOS-AppleSilicon.dmg` | Mac à puce Apple (M1, M2, M3, M4…), macOS 12 Monterey ou plus récent |
-| `PubMedSearch-1.3.1-macOS-Intel.dmg` | Mac à processeur Intel, macOS 12 Monterey ou plus récent |
-| `pubmed-search-gui_1.3.1_amd64.deb` | Ubuntu 20.04+, Debian 10+, Linux Mint 20+ (64 bits) |
+| `PubMedSearch-Setup-1.4.0.exe` | Windows 10 et 11 (64 bits) |
+| `PubMedSearch-1.4.0-macOS-AppleSilicon.dmg` | Mac à puce Apple (M1, M2, M3, M4…), macOS 12 Monterey ou plus récent |
+| `PubMedSearch-1.4.0-macOS-Intel.dmg` | Mac à processeur Intel, macOS 12 Monterey ou plus récent |
+| `pubmed-search-gui_1.4.0_amd64.deb` | Ubuntu 20.04+, Debian 10+, Linux Mint 20+ (64 bits) |
 | `envoyer-vers-pubmed-search-1.0.0.xpi` | Extension Firefox (facultative) |
 | `SHA256SUMS.txt`, `SHA256SUMS-macOS.txt` | Empreintes pour vérifier les fichiers |
 
@@ -28,7 +28,7 @@ Rien d'autre à installer : Python et ses bibliothèques sont inclus dans l'appl
 
 ### Windows 10 / 11
 
-1. Téléchargez `PubMedSearch-Setup-1.3.1.exe` et double-cliquez dessus.
+1. Téléchargez `PubMedSearch-Setup-1.4.0.exe` et double-cliquez dessus.
 2. Windows affiche « Windows a protégé votre ordinateur » : l'installateur n'est pas signé
    numériquement. Cliquez sur **Informations complémentaires**, puis **Exécuter quand même**.
 3. Acceptez la demande d'autorisation administrateur, choisissez le dossier, terminez.
@@ -59,7 +59,7 @@ Vos réglages (`~/Library/Preferences/pubmed-search-gui`) sont conservés.
 
 ```bash
 cd ~/Téléchargements
-sudo apt install ./pubmed-search-gui_1.3.1_amd64.deb
+sudo apt install ./pubmed-search-gui_1.4.0_amd64.deb
 ```
 
 `apt` installe aussi les bibliothèques graphiques nécessaires. Lancez **PubMed Search**
@@ -206,6 +206,31 @@ dans votre navigateur :
 2. Enregistrez chaque PDF dans un dossier réservé à cet usage.
 3. Choisissez ce dossier puis cliquez sur **Importer les PDF** : ils sont reconnus (DOI,
    titre ou PMID dans le nom du fichier), renommés, rangés et ajoutés à l'Excel.
+
+### Identifier un dossier de PDF et créer sa bibliographie
+
+Pour n'importe quel dossier de PDF, même sans recherche préalable (articles reçus de
+collègues, téléchargés au fil du temps…) : onglet **Import manuel** → **Identifier un dossier
+de PDF** → choisissez le dossier, donnez un nom → **Identifier et renommer les PDF**.
+
+Chaque PDF est retrouvé dans PubMed par le PMID ou le DOI présent dans son nom, dans ses
+propriétés ou sur sa première page, sinon par son titre ; un article absent de PubMed est
+cherché dans Crossref. Le titre de la notice trouvée est comparé au texte du PDF pour éviter
+de prendre le DOI d'une référence citée. Les fichiers d'origine ne sont **jamais modifiés** :
+un nouveau dossier `Nom_JJ.MM.AAAA_HHhMM` est créé à côté d'eux, avec :
+
+| Fichier | Contenu |
+|---|---|
+| `PDF_Nom/` | Copies renommées `PMID-Auteur_Initiales(Année).pdf` (`NoPMID-…` hors PubMed) |
+| `PDF_Nom/A_verifier/` | PDF dont l'identification est incertaine, copiés sans être renommés |
+| `Nom.xlsx` | Une ligne par PDF : fichier d'origine, lien vers la copie, méthode et fiabilité de l'identification, PMID, DOI, titre, journal, volume, pages, auteurs, référence complète |
+| `Nom.docx` | Bibliographie au style **Vancouver** (NLM), numérotée, par ordre alphabétique du premier auteur |
+| `a_verifier.txt` | PDF non identifiés, incertains ou en double, avec la raison |
+
+Limites : un PDF scanné (image sans texte) n'est identifié que si son nom contient son PMID
+ou son DOI (ex. `12345678.pdf` ou `10.1016_j.vaccine.2024.01.001.pdf`) ; les doublons ne
+sont copiés qu'une fois. En ligne de commande :
+`python3 pubmed_search.py --identify-pdf ~/Articles --output Ma_biblio`.
 
 ---
 

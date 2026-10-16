@@ -8,10 +8,10 @@ avec le Python intégré à l'application. Rien d'autre à installer pour l'util
 
 | Système | Fichier | Installation |
 |---|---|---|
-| Ubuntu / Debian | `pubmed-search-gui_1.3.1_amd64.deb` | `sudo apt install ./pubmed-search-gui_1.3.1_amd64.deb` |
-| Windows 10 / 11 (64 bits) | `PubMedSearch-Setup-1.3.1.exe` | double-clic (droits administrateur) |
-| macOS 12+ Apple Silicon (M1…M4) | `PubMedSearch-1.3.1-macOS-AppleSilicon.dmg` | ouvrir le .dmg, glisser l'app dans Applications |
-| macOS 12+ Intel | `PubMedSearch-1.3.1-macOS-Intel.dmg` | idem |
+| Ubuntu / Debian | `pubmed-search-gui_1.4.0_amd64.deb` | `sudo apt install ./pubmed-search-gui_1.4.0_amd64.deb` |
+| Windows 10 / 11 (64 bits) | `PubMedSearch-Setup-1.4.0.exe` | double-clic (droits administrateur) |
+| macOS 12+ Apple Silicon (M1…M4) | `PubMedSearch-1.4.0-macOS-AppleSilicon.dmg` | ouvrir le .dmg, glisser l'app dans Applications |
+| macOS 12+ Intel | `PubMedSearch-1.4.0-macOS-Intel.dmg` | idem |
 
 L'installateur Windows n'est pas signé numériquement : au premier lancement, Windows
 SmartScreen affiche « Windows a protégé votre ordinateur » → *Informations complémentaires*
@@ -42,6 +42,8 @@ installées automatiquement par `apt` comme dépendances.
 - **File d'attente** : *Ajouter à la file* (onglet Recherche) prépare plusieurs recherches ;
   l'onglet *File d'attente* les exécute l'une après l'autre, tout de suite ou à une date/heure
   programmée (l'application doit rester ouverte). La file est conservée entre deux sessions.
+- **Import manuel** : (3) *Identifier un dossier de PDF* hors recherche (`--identify-pdf`) :
+  copies renommées, Excel des références et bibliographie Word Vancouver ;
 - **Import manuel** : ouvre par lots de 10 les liens « À ouvrir manuellement » d'error.txt,
   puis importe les PDF enregistrés (`--import-pdf`).
 - **Réglages** : script utilisé, email, clés API (NCBI, CORE, Elsevier, OpenAlex, Springer
@@ -75,11 +77,11 @@ Si une nouvelle version du script importe une bibliothèque absente du Python in
 
 **Linux (.deb)** : `./packaging/linux/build_deb.sh` → `dist/pubmed-search-gui_<version>_amd64.deb`
 
-**Windows (.exe) depuis Linux** (méthode utilisée pour la 1.3.1) : Python Windows
+**Windows (.exe) depuis Linux** (méthode utilisée pour la 1.4.0) : Python Windows
 (python-build-standalone, `uv python install cpython-3.11-windows-x86_64-none`) exécuté sous
 Wine pour PyInstaller (`wine python.exe -m PyInstaller --workpath build-win --distpath dist-win
 pubmed_gui.spec`, sortie redirigée par un tube `| cat`), puis
-`makensis -DVERSION=1.3.1 -DSRCDIR=../../dist-win/PubMedSearch packaging/windows/installer.nsi`
+`makensis -DVERSION=1.4.0 -DSRCDIR=../../dist-win/PubMedSearch packaging/windows/installer.nsi`
 (NSIS, installateur 64 bits pour Windows 10/11).
 
 **Windows (.exe)**, sur un PC Windows avec Python 3.10+ :
