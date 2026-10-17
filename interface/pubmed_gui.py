@@ -19,7 +19,7 @@ import threading
 
 APP_NAME = "PubMed Search"
 APP_ID = "pubmed-search-gui"
-APP_VERSION = "1.4.0"
+APP_VERSION = "1.5.0"
 
 
 # --------------------------------------------------------------------------- #
@@ -342,6 +342,13 @@ class ProgressStrip(QWidget):
         self.setFixedHeight(10)
 
     def set_values(self, total, ok, miss):
+        """Valeurs de la recherche en cours ; non affichées pendant la consultation d'une
+        autre recherche de la file (muted)."""
+        self.live = (total, ok, miss)
+        if not getattr(self, "muted", False):
+            self.show_values(total, ok, miss)
+
+    def show_values(self, total, ok, miss):
         self.total, self.ok, self.miss = total, ok, miss
         self.update()
 
@@ -368,6 +375,8 @@ class Stat(QWidget):
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(0)
         self.value = QLabel("–")
+        self.live = "–"
+        self.muted = False
         self.value.setObjectName("statValue")
         self.value.setStyleSheet(f"color:{color};")
         cap = QLabel(label)
@@ -376,7 +385,30 @@ class Stat(QWidget):
         lay.addWidget(cap)
 
     def set(self, v):
+        self.live = v
+        if not self.muted:
+            self.value.setText(str(v))
+
+    def show(self, v):
         self.value.setText(str(v))
+
+
+class LiveLabel(QLabel):
+    """Étiquette de phase : garde le texte « en direct » pendant qu'on consulte le journal
+    d'une autre recherche de la file."""
+
+    def __init__(self, text=""):
+        super().__init__(text)
+        self.live = text
+        self.muted = False
+
+    def setText(self, text):  # noqa: N802
+        self.live = text
+        if not self.muted:
+            super().setText(text)
+
+    def show_text(self, text):
+        super().setText(text)
 
 
 def field_label(text, buddy=None):
@@ -546,6 +578,221 @@ def compose_query(base, groups):
     if len(parts) == 1:
         return parts[0]
     return " AND ".join(f"({p})" for p in parts)
+
+
+# --------------------------------------------------------------------------- #
+# Liste de recherches au format Excel (file d'attente)
+# --------------------------------------------------------------------------- #
+def _filter_columns(groups):
+    """[(titre du volet, libellé, requête ou None pour ALL)] dans l'ordre des volets."""
+    cols = []
+    for g in groups:
+        for el in g["elements"]:
+            cols.append((g["titre"], el.get("label", ""), None if el.get("tout") else el.get("query", "")))
+    return cols
+
+
+def write_queue_template(path, groups, max_default=100, outdir_default=""):
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Font, PatternFill, Border, Side
+    from openpyxl.utils import get_column_letter
+    from openpyxl.worksheet.datavalidation import DataValidation
+    from openpyxl.comments import Comment
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Recherches"
+    fixed = MainWindow.TPL_FIXED
+    fcols = _filter_columns(groups)
+    hema, eosin = "3A3D8F", "C8467A"
+    head_fill = PatternFill("solid", fgColor=hema)
+    grp_fill = PatternFill("solid", fgColor=eosin)
+    white = Font(bold=True, color="FFFFFF")
+    thin = Side(style="thin", color="D0D0DC")
+    # ligne 1 : volets de filtres ; ligne 2 : intitulés des colonnes
+    ws.cell(1, 1, "Paramètres de la recherche").font = white
+    ws.cell(1, 1).fill = head_fill
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=len(fixed))
+    for i, name in enumerate(fixed, 1):
+        c = ws.cell(2, i, name)
+        c.font = white
+        c.fill = head_fill
+        c.alignment = Alignment(wrap_text=True, vertical="center")
+    col = len(fixed) + 1
+    spans = {}
+    for gtitle, label, q in fcols:
+        if gtitle not in spans:
+            spans[gtitle] = [col, col]
+            ws.cell(1, col, gtitle).font = white
+            ws.cell(1, col).fill = grp_fill
+        spans[gtitle][1] = col
+        c = ws.cell(2, col, label)
+        c.font = Font(bold=True, color="FFFFFF")
+        c.fill = grp_fill
+        c.alignment = Alignment(wrap_text=True, vertical="center", horizontal="center")
+        c.comment = Comment((q[:900] if q else "Coche tout le volet"), "PubMed Search")
+        col += 1
+    last = col - 1
+    for c0, c1 in spans.values():
+        if c1 > c0:
+            ws.merge_cells(start_row=1, start_column=c0, end_row=1, end_column=c1)
+    ws.row_dimensions[2].height = 60
+    # ligne d'exemple (ignorée à l'import tant que le nom commence par « Exemple_ »)
+    ex = ["Exemple_HPV_vaccin", "(HPV[tiab] OR papillomavirus[tiab]) AND vaccin*[tiab]", "Pertinence",
+          max_default, 0, "Oui", "Non", outdir_default]
+    for i, v in enumerate(ex, 1):
+        c = ws.cell(3, i, v)
+        c.font = Font(italic=True, color="7A7A90")
+    nrows = 200
+    # listes déroulantes
+    dv_sort = DataValidation(type="list", formula1='"Pertinence,Plus récents,Les deux"', allow_blank=True)
+    dv_yes = DataValidation(type="list", formula1='"Oui,Non"', allow_blank=True)
+    dv_x = DataValidation(type="list", formula1='"x"', allow_blank=True,
+                          errorTitle="Case à cocher", error="Tapez x pour cocher ce filtre, ou laissez vide.")
+    dv_max = DataValidation(type="whole", operator="between", formula1="1", formula2="10000", allow_blank=True)
+    dv_pass = DataValidation(type="whole", operator="between", formula1="0", formula2="10", allow_blank=True)
+    for dv in (dv_sort, dv_yes, dv_x, dv_max, dv_pass):
+        ws.add_data_validation(dv)
+    dv_sort.add(f"C3:C{nrows}")
+    dv_max.add(f"D3:D{nrows}")
+    dv_pass.add(f"E3:E{nrows}")
+    dv_yes.add(f"F3:G{nrows}")
+    if last > len(fixed):
+        dv_x.add(f"{get_column_letter(len(fixed) + 1)}3:{get_column_letter(last)}{nrows}")
+    widths = [24, 60, 14, 12, 12, 12, 12, 34]
+    for i, w in enumerate(widths, 1):
+        ws.column_dimensions[get_column_letter(i)].width = w
+    for cc in range(len(fixed) + 1, last + 1):
+        ws.column_dimensions[get_column_letter(cc)].width = 11
+        for r in range(3, 60):
+            ws.cell(r, cc).alignment = Alignment(horizontal="center")
+            ws.cell(r, cc).border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    ws.freeze_panes = "C3"
+
+    hp = wb.create_sheet("Mode d'emploi")
+    lines = [
+        ("Liste de recherches pour la file d'attente de PubMed Search", True),
+        ("", False),
+        ("1. Une ligne par recherche, à partir de la ligne 3 de l'onglet Recherches.", False),
+        ("2. Nom (obligatoire) : sert au fichier Excel et au dossier de résultats. Lettres sans accent, "
+         "chiffres, - et _ (les autres caractères sont remplacés par _).", False),
+        ("3. Requête PubMed : même syntaxe que sur le site. Elle peut être vide si au moins un filtre "
+         "est coché.", False),
+        ("4. Filtres : tapez x dans les colonnes à cocher (couleur rose). Comme dans l'application, les "
+         "cases d'un même volet sont combinées par OR, les volets et la requête par AND. La colonne ALL "
+         "d'un volet coche tout le volet. Survolez l'intitulé d'une colonne pour voir les termes.", False),
+        ("5. Colonnes laissées vides : valeurs de l'onglet Recherche au moment de l'import (tri, nombre "
+         "d'articles, passes, dossier). Télécharger les PDF : Oui par défaut ; JSON : Non par défaut.", False),
+        ("6. La ligne grise d'exemple est ignorée tant que son nom commence par « Exemple_ ».", False),
+        ("7. Enregistrez, puis dans l'onglet File d'attente : « Importer une liste (Excel)… ». Les "
+         "recherches s'ajoutent à la file ; vérifiez-les puis cliquez sur « Lancer la file ».", False),
+        ("", False),
+        ("Les colonnes de filtres correspondent aux filtres de l'application au moment où ce modèle a été "
+         "créé. Si vous modifiez vos filtres, créez un nouveau modèle : une colonne inconnue est signalée "
+         "et ignorée à l'import.", False),
+    ]
+    for t, bold in lines:
+        hp.append([t])
+        if bold:
+            hp.cell(hp.max_row, 1).font = Font(bold=True, size=13)
+        hp.cell(hp.max_row, 1).alignment = Alignment(wrap_text=True, vertical="top")
+    hp.column_dimensions["A"].width = 110
+    wb.save(path)
+
+
+def read_queue_excel(path, groups, defaults):
+    """Lit une liste de recherches (modèle de l'application). Renvoie (jobs, problèmes)."""
+    import unicodedata
+    from openpyxl import load_workbook
+    wb = load_workbook(path, data_only=True)
+    ws = wb["Recherches"] if "Recherches" in wb.sheetnames else wb.worksheets[0]
+    fixed = MainWindow.TPL_FIXED
+    norm = lambda v: " ".join(str(v or "").split()).lower()  # noqa: E731
+    head2 = [ws.cell(2, c).value for c in range(1, ws.max_column + 1)]
+    if [norm(h) for h in head2[:len(fixed)]] != [norm(h) for h in fixed]:
+        raise ValueError("ce fichier ne suit pas le modèle (ligne 2 : « Nom (fichier Excel) », "
+                         "« Requête PubMed »…). Créez-le avec « Créer le modèle Excel… ».")
+    known = {}
+    gindex = {g["titre"]: i for i, g in enumerate(groups)}
+    for gt, lbl, q in _filter_columns(groups):
+        known[(norm(gt), norm(lbl))] = (gindex[gt], q)
+    problems = []
+    cols = []          # (colonne, index du volet, requête ou None=ALL, libellé)
+    cur_group = ""
+    for c in range(len(fixed) + 1, ws.max_column + 1):
+        g = ws.cell(1, c).value
+        if g:
+            cur_group = str(g)
+        lbl = ws.cell(2, c).value
+        if not lbl:
+            continue
+        k = (norm(cur_group), norm(lbl))
+        if k in known:
+            cols.append((c, known[k][0], known[k][1], str(lbl)))
+        else:
+            problems.append(f"Colonne « {cur_group} → {lbl} » : filtre inconnu de l'application, ignorée.")
+    jobs = []
+    for r in range(3, ws.max_row + 1):
+        vals = [ws.cell(r, c).value for c in range(1, len(fixed) + 1)]
+        checked = [(gi, q, lbl) for c, gi, q, lbl in cols if norm(ws.cell(r, c).value) in ("x", "oui", "1", "✓", "true")]
+        if not any(v not in (None, "") for v in vals) and not checked:
+            continue
+        name = str(vals[0] or "").strip()
+        where = f"Ligne {r}"
+        if name.lower().startswith("exemple_"):
+            continue
+        stem = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode()
+        stem = re.sub(r"[^A-Za-z0-9_\-]+", "_", stem).strip("_")
+        if not stem:
+            problems.append(f"{where} : nom manquant, ligne ignorée.")
+            continue
+        if stem != name:
+            problems.append(f"{where} : nom « {name} » transformé en « {stem} ».")
+        base = " ".join(str(vals[1] or "").split())
+        sel = [[] for _ in groups]
+        labels = []
+        for gi, q, lbl in checked:
+            if q is None:      # ALL : tout le volet
+                for el in groups[gi]["elements"]:
+                    if not el.get("tout") and el.get("query") and el["query"] not in sel[gi]:
+                        sel[gi].append(el["query"])
+                        labels.append(el.get("label", ""))
+            elif q not in sel[gi]:
+                sel[gi].append(q)
+                labels.append(lbl)
+        query = compose_query(base, sel)
+        if not query:
+            problems.append(f"{where} ({stem}) : ni requête ni filtre coché, ligne ignorée.")
+            continue
+        sort_txt = norm(vals[2])
+        sort = MainWindow.TPL_SORTS.get(sort_txt, defaults["sort"]) if sort_txt else defaults["sort"]
+        if sort_txt and sort_txt not in MainWindow.TPL_SORTS:
+            problems.append(f"{where} ({stem}) : tri « {vals[2]} » inconnu, tri par défaut utilisé.")
+
+        def num(v, lo, hi, dflt, what):
+            if v in (None, ""):
+                return dflt
+            try:
+                n = int(float(v))
+            except (TypeError, ValueError):
+                problems.append(f"{where} ({stem}) : {what} « {v} » invalide, {dflt} utilisé.")
+                return dflt
+            if not lo <= n <= hi:
+                problems.append(f"{where} ({stem}) : {what} ramené entre {lo} et {hi}.")
+            return max(lo, min(hi, n))
+        mx = num(vals[3], 1, 10000, defaults["max"], "nombre d'articles")
+        passes = num(vals[4], 0, 10, defaults["passes"], "nombre de passes")
+        getpdf = norm(vals[5]) not in ("non", "no", "0", "false")
+        getjson = norm(vals[6]) in ("oui", "yes", "1", "true", "x") and defaults.get("json_ok", True)
+        outdir = os.path.expanduser(str(vals[7] or "").strip()) or defaults["outdir"]
+        if not outdir:
+            problems.append(f"{where} ({stem}) : aucun dossier de destination (ni dans le fichier, ni dans "
+                            "l'onglet Recherche), ligne ignorée.")
+            continue
+        jobs.append({"stem": stem, "query": query, "base_query": base, "filters": labels,
+                     "outdir": outdir, "max": mx, "sort": sort, "getpdf": getpdf, "getjson": getjson,
+                     "sources": defaults.get("sources"), "passes": passes, "status": "attente",
+                     "summary": ""})
+    return jobs, problems
 
 
 # sources optionnelles du script (--sources) : clé, libellé, info-bulle
@@ -932,6 +1179,7 @@ class MainWindow(QMainWindow):
         self.settings_path = os.path.join(config_dir(), "settings.json")
         self.proc = None
         self.run_kind = None
+        self._viewing = None
         self.results_dir = ""
         self.excel_path = ""
         self.word_path = ""
@@ -1491,8 +1739,26 @@ class MainWindow(QMainWindow):
         lay.setContentsMargins(28, 24, 28, 28)
         lay.setSpacing(6)
         lay.addWidget(hint("Préparez plusieurs recherches dans l'onglet Recherche avec « Ajouter à la file », "
-                           "puis lancez-les ici l'une après l'autre, tout de suite ou à une heure choisie. "
-                           "Les identifiants utilisés sont ceux des Réglages au moment du lancement."))
+                           "ou importez-les d'un fichier Excel, puis lancez-les ici l'une après l'autre, "
+                           "tout de suite ou à une heure choisie. Cliquez sur une recherche pour afficher "
+                           "son journal à droite."))
+        irow = QHBoxLayout()
+        irow.setSpacing(6)
+        self.q_import = QPushButton("Importer une liste (Excel)…")
+        self.q_import.setObjectName("secondary")
+        self.q_import.setToolTip("Ajoute à la file toutes les recherches d'un fichier Excel rempli "
+                                 "à partir du modèle")
+        self.q_import.clicked.connect(self._queue_import_excel)
+        self.q_template = QPushButton("Créer le modèle Excel…")
+        self.q_template.setObjectName("secondary")
+        self.q_template.setToolTip("Fichier Excel à remplir : une ligne par recherche, une colonne par "
+                                   "filtre (y compris vos filtres personnalisés)")
+        self.q_template.clicked.connect(self._queue_make_template)
+        irow.addWidget(self.q_import)
+        irow.addWidget(self.q_template)
+        irow.addStretch(1)
+        lay.addSpacing(6)
+        lay.addLayout(irow)
         lay.addSpacing(12)
         self.qtable = QTableWidget(0, 5)
         self.qtable.setObjectName("queue")
@@ -1516,10 +1782,11 @@ class MainWindow(QMainWindow):
         hh.setHighlightSections(False)
         self.qtable.setMinimumHeight(260)
         self.qtable.itemSelectionChanged.connect(self._queue_buttons)
+        self.qtable.itemSelectionChanged.connect(self._queue_selection_changed)
         self.qtable.cellDoubleClicked.connect(self._queue_open_result)
         lay.addWidget(self.qtable, 1)
         self.queue_empty = hint("La file est vide. Remplissez l'onglet Recherche puis cliquez sur "
-                                "« Ajouter à la file ».")
+                                "« Ajouter à la file », ou importez une liste de recherches (Excel).")
         lay.addWidget(self.queue_empty)
 
         row = QGridLayout()
@@ -1578,6 +1845,188 @@ class MainWindow(QMainWindow):
         self.q_status = hint("")
         lay.addWidget(self.q_status)
         return w
+
+    # ------------------------------------------------ journal par recherche de la file
+    def _job_log_path(self, job):
+        if not job.get("id"):
+            import uuid
+            job["id"] = uuid.uuid4().hex[:12]
+        d = os.path.join(config_dir(), "journaux")
+        os.makedirs(d, exist_ok=True)
+        return os.path.join(d, job["id"] + ".json")
+
+    def _save_job_log(self, job):
+        lines = job.get("_log") or []
+        try:
+            with open(self._job_log_path(job), "w", encoding="utf-8") as f:
+                json.dump([[t, k] for t, k in lines[-20000:]], f, ensure_ascii=False)
+        except OSError:
+            pass
+
+    def _delete_job_log(self, job):
+        if job.get("id"):
+            try:
+                os.remove(self._job_log_path(job))
+            except OSError:
+                pass
+
+    def _load_job_log(self, job):
+        if job.get("_log") is None and job.get("id"):
+            try:
+                with open(self._job_log_path(job), encoding="utf-8") as f:
+                    job["_log"] = [(t, k) for t, k in json.load(f)]
+            except (OSError, ValueError):
+                job["_log"] = []
+        return job.get("_log") or []
+
+    def _shown_paths(self):
+        """Dossier, Excel et error.txt (ou Word) de ce qui est affiché dans le journal."""
+        v = getattr(self, "_viewing", None)
+        if v is None:
+            third = (self.word_path if self.run_kind == "identify"
+                     else os.path.join(self.results_dir, "error.txt") if self.results_dir else "")
+            return self.results_dir, self.excel_path, third
+        res = v.get("results") or ""
+        xl = os.path.join(res, v["stem"] + ".xlsx") if res else ""
+        return res, xl, os.path.join(res, "error.txt") if res else ""
+
+    def _queue_selection_changed(self):
+        r = self._queue_sel()
+        if r < 0:
+            return
+        job = self.queue[r]
+        if job is self.current_job and self.proc is not None:
+            self._view_job(None)          # recherche en cours : journal en direct
+        else:
+            self._view_job(job)
+
+    def _view_job(self, job):
+        """Affiche dans le panneau Journal le journal d'une recherche de la file (job), ou
+        revient à l'affichage en direct (None)."""
+        widgets = (self.s_ok, self.s_miss, self.s_left, self.s_rate, self.s_json)
+        if job is None:
+            if getattr(self, "_viewing", None) is None:
+                return
+            self._viewing = None
+            for wdg in widgets:
+                wdg.muted = False
+                wdg.show(wdg.live)
+            self.phase.muted = False
+            self.phase.show_text(self.phase.live)
+            self.s_json.setVisible(getattr(self, "_live_json_vis", False))
+            self.strip.muted = False
+            self.strip.show_values(*getattr(self.strip, "live", (0, 0, 0)))
+            self._show_state(*getattr(self, "_live_state", ("Prêt", "")))
+            for b, en in zip((self.open_dir_btn, self.open_xlsx_btn, self.open_err_btn),
+                             getattr(self, "_live_btns", (False, False, False))):
+                b.setEnabled(en)
+            self.open_err_btn.setText("Ouvrir le Word" if self.run_kind == "identify" else "Ouvrir error.txt")
+            self.view_bar.hide()
+            self._recolor_log()
+            return
+        if getattr(self, "_viewing", None) is None:
+            self._live_btns = tuple(b.isEnabled() for b in
+                                    (self.open_dir_btn, self.open_xlsx_btn, self.open_err_btn))
+            self._live_json_vis = self.s_json.isVisibleTo(self.s_json.parentWidget())
+        self._viewing = job
+        for wdg in widgets + (self.phase, self.strip):
+            wdg.muted = True
+        st = job.get("stats") or {}
+        waiting = job["status"] == "attente"
+        self.s_ok.show(st.get("ok", "–"))
+        self.s_miss.show(st.get("miss", "–"))
+        self.s_left.show(st.get("left", "–"))
+        self.s_rate.show(st.get("rate", "–"))
+        self.s_json.show(st.get("json", "–"))
+        self.s_json.setVisible(bool(st.get("json_shown")))
+        self.strip.show_values(*(st.get("strip") or (0, 0, 0)))
+        self.phase.show_text(st.get("phase") or ("En attente dans la file." if waiting
+                                                  else self.STATUS.get(job["status"], "")))
+        stt = st.get("state") or (self.STATUS.get(job["status"], ""),
+                                  {"ok": "ok", "erreur": "err", "arret": "warn"}.get(job["status"], ""))
+        self._show_state(*stt)
+        self.log.clear()
+        lines = self._load_job_log(job)
+        if lines:
+            for t, k in lines[-20000:]:
+                self._append(t, k, record=False)
+        elif waiting:
+            self.log.setPlaceholderText("")
+            self._append("Cette recherche n'a pas encore été lancée.\n", "dim", record=False)
+            self._append(f"Requête : {job['query']}\n", "dim", record=False)
+        else:
+            self._append("Journal indisponible pour cette recherche (lancée avec une version "
+                         "antérieure de l'application).\n", "dim", record=False)
+        res, xl, err = self._shown_paths()
+        self.open_dir_btn.setEnabled(bool(res) and os.path.isdir(res))
+        self.open_xlsx_btn.setEnabled(bool(xl) and os.path.exists(xl))
+        self.open_err_btn.setText("Ouvrir error.txt")
+        self.open_err_btn.setEnabled(bool(err) and os.path.exists(err))
+        live = self.proc is not None
+        self.view_lbl.setText(f"Journal de « {job['stem']} » ({self.STATUS.get(job['status'], '')})"
+                              + (" — une recherche est en cours" if live else ""))
+        self.view_back.setText("Revenir à la recherche en cours" if live else "Revenir au journal")
+        self.view_bar.show()
+
+    # ------------------------------------------------ import d'une liste de recherches (Excel)
+    TPL_FIXED = ["Nom (fichier Excel)", "Requête PubMed", "Tri", "Articles max (par tri)",
+                 "Passes supplémentaires", "Télécharger les PDF", "Texte intégral JSON",
+                 "Dossier de destination"]
+    TPL_SORTS = {"pertinence": "best", "best match": "best", "plus récents": "recent",
+                 "plus recents": "recent", "most recent": "recent", "les deux": "both", "both": "both"}
+
+    def _queue_make_template(self):
+        start = os.path.join(QStandardPaths.writableLocation(QStandardPaths.DocumentsLocation)
+                             or os.path.expanduser("~"), "PubMedSearch_liste_recherches.xlsx")
+        path, _ = QFileDialog.getSaveFileName(self, "Créer le modèle Excel", start, "Excel (*.xlsx)")
+        if not path:
+            return
+        if not path.lower().endswith(".xlsx"):
+            path += ".xlsx"
+        try:
+            write_queue_template(path, self.filter_groups, self.max_results.value(),
+                                 self.outdir.text().strip())
+        except Exception as e:  # noqa
+            QMessageBox.warning(self, "Modèle Excel", f"Impossible d'écrire le fichier :\n{e}")
+            return
+        self.q_status.setText(f"Modèle créé : {path}. Remplissez une ligne par recherche, cochez les "
+                              "filtres avec x, enregistrez, puis « Importer une liste (Excel)… ».")
+        self._open_path(path)
+
+    def _queue_import_excel(self):
+        start = QStandardPaths.writableLocation(QStandardPaths.DocumentsLocation) or os.path.expanduser("~")
+        path, _ = QFileDialog.getOpenFileName(self, "Importer une liste de recherches", start,
+                                              "Excel (*.xlsx)")
+        if not path:
+            return
+        defaults = {"max": self.max_results.value(), "passes": self.passes.value(),
+                    "sort": self._sort_key(), "outdir": self.outdir.text().strip(),
+                    "sources": self._selected_sources() if self.sources_sec.isEnabled() else None,
+                    "json_ok": self.getjson.isEnabled()}
+        try:
+            jobs, problems = read_queue_excel(path, self.filter_groups, defaults)
+        except Exception as e:  # noqa
+            QMessageBox.warning(self, "Import", f"Lecture impossible :\n{e}")
+            return
+        existing = {j["stem"] for j in self.queue}
+        for j in jobs:
+            if j["stem"] in existing:
+                problems.append(f"« {j['stem']} » : ce nom est déjà dans la file (les résultats iront "
+                                "dans des dossiers distincts, horodatés).")
+            existing.add(j["stem"])
+        self.queue.extend(jobs)
+        self._queue_refresh()
+        self._save_settings()
+        msg = f"{len(jobs)} recherche(s) ajoutée(s) à la file depuis {os.path.basename(path)}."
+        self.q_status.setText(msg)
+        if problems:
+            box = QMessageBox(self)
+            box.setWindowTitle("Import de la liste")
+            box.setIcon(QMessageBox.Warning if jobs else QMessageBox.Critical)
+            box.setText(msg + ("\n\nÀ vérifier :" if jobs else "\n\nAucune recherche importée :"))
+            box.setDetailedText("\n".join(problems))
+            box.setInformativeText("\n".join(problems[:8]) + ("\n…" if len(problems) > 8 else ""))
+            box.exec()
 
     def _queue_refresh(self):
         self.qtable.setRowCount(len(self.queue))
@@ -1645,11 +2094,19 @@ class MainWindow(QMainWindow):
     def _queue_remove(self):
         r = self._queue_sel()
         if r >= 0 and self.queue[r]["status"] != "cours":
+            if self._viewing is self.queue[r]:
+                self._view_job(None)
+            self._delete_job_log(self.queue[r])
             del self.queue[r]
             self._queue_refresh()
             self._save_settings()
 
     def _queue_clear_done(self):
+        for j in self.queue:
+            if j["status"] not in ("attente", "cours"):
+                if self._viewing is j:
+                    self._view_job(None)
+                self._delete_job_log(j)
         self.queue = [j for j in self.queue if j["status"] in ("attente", "cours")]
         self._queue_refresh()
         self._save_settings()
@@ -1759,8 +2216,14 @@ class MainWindow(QMainWindow):
             return
         job["status"] = "ok" if code == 0 else ("arret" if code == 130 else "erreur")
         job["results"] = self.results_dir
-        ok_txt = self.s_ok.value.text()
-        rate = self.s_rate.value.text()
+        ok_txt = str(self.s_ok.live)
+        rate = str(self.s_rate.live)
+        job["stats"] = {"ok": self.s_ok.live, "miss": self.s_miss.live, "left": self.s_left.live,
+                        "rate": self.s_rate.live, "json": self.s_json.live,
+                        "json_shown": self.s_json.isVisibleTo(self.s_json.parentWidget()),
+                        "strip": list(getattr(self.strip, "live", (0, 0, 0))),
+                        "phase": self.phase.live, "state": list(getattr(self, "_live_state", ("", "")))}
+        self._save_job_log(job)
         job["summary"] = (f"{ok_txt} PDF" + (f", {rate}" if rate not in ("–", "") else "")) \
             if ok_txt not in ("–", "") else ("erreur" if code not in (0, 130) else "")
         if code == 130:
@@ -2076,7 +2539,8 @@ class MainWindow(QMainWindow):
 
     def _recolor_log(self):
         """Réapplique les couleurs au journal existant après un changement de fond."""
-        lines = getattr(self, "_log_lines", [])
+        v = getattr(self, "_viewing", None)
+        lines = (v.get("_log") or []) if v is not None else getattr(self, "_log_lines", [])
         if not lines:
             return
         self.log.clear()
@@ -2114,9 +2578,25 @@ class MainWindow(QMainWindow):
         lay.addLayout(stats)
         self.strip = ProgressStrip()
         lay.addWidget(self.strip)
-        self.phase = QLabel("Remplissez la recherche puis lancez-la.")
+        self.phase = LiveLabel("Remplissez la recherche puis lancez-la.")
         self.phase.setObjectName("phase")
         lay.addWidget(self.phase)
+
+        # bandeau : journal d'une recherche de la file consultée (et non la recherche en cours)
+        self.view_bar = QFrame()
+        self.view_bar.setObjectName("viewBar")
+        vb = QHBoxLayout(self.view_bar)
+        vb.setContentsMargins(12, 6, 6, 6)
+        self.view_lbl = QLabel("")
+        self.view_lbl.setObjectName("viewLbl")
+        self.view_lbl.setWordWrap(True)
+        self.view_back = QPushButton("Revenir au direct")
+        self.view_back.setObjectName("onDark")
+        self.view_back.clicked.connect(lambda: self._view_job(None))
+        vb.addWidget(self.view_lbl, 1)
+        vb.addWidget(self.view_back)
+        self.view_bar.hide()
+        lay.addWidget(self.view_bar)
 
         self.log = QPlainTextEdit()
         self.log.setObjectName("log")
@@ -2139,11 +2619,9 @@ class MainWindow(QMainWindow):
         for b in (self.open_dir_btn, self.open_xlsx_btn, self.open_err_btn):
             b.setObjectName("onDark")
             b.setEnabled(False)
-        self.open_dir_btn.clicked.connect(lambda: self._open_path(self.results_dir))
-        self.open_xlsx_btn.clicked.connect(lambda: self._open_path(self.excel_path))
-        self.open_err_btn.clicked.connect(lambda: self._open_path(
-            self.word_path if self.run_kind == "identify"
-            else os.path.join(self.results_dir, "error.txt")))
+        self.open_dir_btn.clicked.connect(lambda: self._open_path(self._shown_paths()[0]))
+        self.open_xlsx_btn.clicked.connect(lambda: self._open_path(self._shown_paths()[1]))
+        self.open_err_btn.clicked.connect(lambda: self._open_path(self._shown_paths()[2]))
         copy = QPushButton("Copier")
         copy.setObjectName("onDark")
         copy.setToolTip("Copier tout le journal")
@@ -2403,8 +2881,11 @@ class MainWindow(QMainWindow):
         self._launch(script, args, "identify")
 
     def _launch(self, script, args, kind):
+        self._view_job(None)
         self.log.clear()
         self._log_lines = []
+        if kind == "search" and self.current_job is not None:
+            self.current_job["_log"] = self._log_lines   # journal propre à cette recherche
         self._counts = {"total": 0, "ok": 0, "miss": 0}
         self._json_phase = False
         self._json_ok = 0
@@ -2552,6 +3033,8 @@ class MainWindow(QMainWindow):
             self._log_lines.append((text, kind))
             if len(self._log_lines) > 25000:
                 del self._log_lines[:5000]
+            if getattr(self, "_viewing", None) is not None:
+                return   # on consulte le journal d'une autre recherche de la file
         cur = self.log.textCursor()
         cur.movePosition(QTextCursor.End)
         fmt = QTextCharFormat()
@@ -2597,6 +3080,12 @@ class MainWindow(QMainWindow):
         self.stop_btn.setEnabled(False)
 
     def _set_state(self, text, state):
+        self._live_state = (text, state)
+        if getattr(self, "_viewing", None) is not None:
+            return
+        self._show_state(text, state)
+
+    def _show_state(self, text, state):
         self.state.setText(text)
         self.state.setProperty("state", state)
         self._repolish(self.state)
@@ -2678,8 +3167,9 @@ class MainWindow(QMainWindow):
             "python_custom": self.py_custom.isChecked(),
             "python_path": self.py_path.text().strip(),
             "geometry": bytes(self.saveGeometry()).hex(),
-            "queue": [dict(j, status=("attente" if j["status"] == "cours" else j["status"]))
-                      for j in self.queue],
+            "queue": [{k: v for k, v in dict(j, status=("attente" if j["status"] == "cours"
+                                                        else j["status"])).items()
+                       if not k.startswith("_")} for j in self.queue],
         }
         if self.remember_keys.isChecked():
             s["keys"] = {"ncbi": self.k_ncbi.text(), "core": self.k_core.text(),

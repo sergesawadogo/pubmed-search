@@ -14,6 +14,8 @@ import openpyxl  # noqa: F401
 import openpyxl.cell.cell  # noqa: F401
 import openpyxl.styles  # noqa: F401
 import openpyxl.utils  # noqa: F401
+import openpyxl.worksheet.datavalidation  # noqa: F401
+import openpyxl.comments  # noqa: F401
 import pypdf  # noqa: F401
 
 # bibliothèque standard

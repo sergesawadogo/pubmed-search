@@ -13,10 +13,10 @@ Page des téléchargements : **[Dernière version](https://github.com/sergesawad
 
 | Fichier | Pour |
 |---|---|
-| `PubMedSearch-Setup-1.4.0.exe` | Windows 10 et 11 (64 bits) |
-| `PubMedSearch-1.4.0-macOS-AppleSilicon.dmg` | Mac à puce Apple (M1, M2, M3, M4…), macOS 12 Monterey ou plus récent |
-| `PubMedSearch-1.4.0-macOS-Intel.dmg` | Mac à processeur Intel, macOS 12 Monterey ou plus récent |
-| `pubmed-search-gui_1.4.0_amd64.deb` | Ubuntu 20.04+, Debian 10+, Linux Mint 20+ (64 bits) |
+| `PubMedSearch-Setup-1.5.0.exe` | Windows 10 et 11 (64 bits) |
+| `PubMedSearch-1.5.0-macOS-AppleSilicon.dmg` | Mac à puce Apple (M1, M2, M3, M4…), macOS 12 Monterey ou plus récent |
+| `PubMedSearch-1.5.0-macOS-Intel.dmg` | Mac à processeur Intel, macOS 12 Monterey ou plus récent |
+| `pubmed-search-gui_1.5.0_amd64.deb` | Ubuntu 20.04+, Debian 10+, Linux Mint 20+ (64 bits) |
 | `envoyer-vers-pubmed-search-1.0.0.xpi` | Extension Firefox (facultative) |
 | `SHA256SUMS.txt`, `SHA256SUMS-macOS.txt` | Empreintes pour vérifier les fichiers |
 
@@ -28,7 +28,7 @@ Rien d'autre à installer : Python et ses bibliothèques sont inclus dans l'appl
 
 ### Windows 10 / 11
 
-1. Téléchargez `PubMedSearch-Setup-1.4.0.exe` et double-cliquez dessus.
+1. Téléchargez `PubMedSearch-Setup-1.5.0.exe` et double-cliquez dessus.
 2. Windows affiche « Windows a protégé votre ordinateur » : l'installateur n'est pas signé
    numériquement. Cliquez sur **Informations complémentaires**, puis **Exécuter quand même**.
 3. Acceptez la demande d'autorisation administrateur, choisissez le dossier, terminez.
@@ -59,7 +59,7 @@ Vos réglages (`~/Library/Preferences/pubmed-search-gui`) sont conservés.
 
 ```bash
 cd ~/Téléchargements
-sudo apt install ./pubmed-search-gui_1.4.0_amd64.deb
+sudo apt install ./pubmed-search-gui_1.5.0_amd64.deb
 ```
 
 `apt` installe aussi les bibliothèques graphiques nécessaires. Lancez **PubMed Search**
@@ -176,6 +176,26 @@ Préparez plusieurs recherches avec **Ajouter à la file** (onglet Recherche), p
 l'une après l'autre depuis l'onglet **File d'attente**, tout de suite ou à une date et une
 heure choisies. L'application et l'ordinateur doivent rester allumés jusqu'à l'heure prévue.
 La file est conservée quand vous fermez l'application.
+
+**Journal de chaque recherche** : cliquez sur une recherche de la file pour afficher son
+journal et ses compteurs dans le panneau de droite (les boutons *Ouvrir le dossier*,
+*l'Excel* et *error.txt* pointent alors vers ses résultats). Un bandeau indique la recherche
+affichée ; **Revenir à la recherche en cours** rétablit le journal en direct. Les journaux
+sont conservés d'une session à l'autre, jusqu'à ce que la recherche soit retirée de la file.
+
+**Importer une liste de recherches depuis Excel** :
+
+1. Onglet **File d'attente** → **Créer le modèle Excel…** : un fichier à remplir s'ouvre.
+2. Une ligne par recherche : nom, requête PubMed, tri, nombre d'articles, passes, PDF, JSON,
+   dossier de destination. Les colonnes roses correspondent à **vos filtres** (y compris ceux
+   que vous avez créés) : tapez **x** pour cocher. La colonne ALL d'un volet coche tout le volet.
+   Une colonne laissée vide prend la valeur de l'onglet Recherche.
+3. Enregistrez, puis **Importer une liste (Excel)…** : les recherches s'ajoutent à la file et
+   les lignes incorrectes sont signalées (nom manquant, ni requête ni filtre, valeur hors limites).
+4. Vérifiez la file, puis **Lancer la file** (ou programmez-la).
+
+Si vous modifiez vos filtres, recréez le modèle : une colonne de filtre inconnue est ignorée
+et signalée à l'import.
 
 ![File d'attente](docs/captures/file-attente.png)
 
