@@ -8,10 +8,10 @@ avec le Python intégré à l'application. Rien d'autre à installer pour l'util
 
 | Système | Fichier | Installation |
 |---|---|---|
-| Ubuntu / Debian | `pubmed-search-gui_1.5.0_amd64.deb` | `sudo apt install ./pubmed-search-gui_1.5.0_amd64.deb` |
-| Windows 10 / 11 (64 bits) | `PubMedSearch-Setup-1.5.0.exe` | double-clic (droits administrateur) |
-| macOS 12+ Apple Silicon (M1…M4) | `PubMedSearch-1.5.0-macOS-AppleSilicon.dmg` | ouvrir le .dmg, glisser l'app dans Applications |
-| macOS 12+ Intel | `PubMedSearch-1.5.0-macOS-Intel.dmg` | idem |
+| Ubuntu / Debian | `pubmed-search-gui_1.6.0_amd64.deb` | `sudo apt install ./pubmed-search-gui_1.6.0_amd64.deb` |
+| Windows 10 / 11 (64 bits) | `PubMedSearch-Setup-1.6.0.exe` | double-clic (droits administrateur) |
+| macOS 12+ Apple Silicon (M1…M4) | `PubMedSearch-1.6.0-macOS-AppleSilicon.dmg` | ouvrir le .dmg, glisser l'app dans Applications |
+| macOS 12+ Intel | `PubMedSearch-1.6.0-macOS-Intel.dmg` | idem |
 
 L'installateur Windows n'est pas signé numériquement : au premier lancement, Windows
 SmartScreen affiche « Windows a protégé votre ordinateur » → *Informations complémentaires*
@@ -39,6 +39,9 @@ installées automatiquement par `apt` comme dépendances.
   réglages) et l'applique aussitôt. Les volets ajoutés dans une nouvelle version de l'application
   sont ajoutés à cette copie, sauf ceux que l'utilisateur a supprimés (`groupes_retires`).
 - **PDF / JSON** : deux cases côte à côte ; *Sources utilisées* (volet à cases) → `--sources`.
+- **Évaluer** (onglet Recherche) et **Évaluer la file** : comptes PubMed (gratuits, dont PMC,
+  payants) avant de lancer, sans téléchargement (`--evaluate`) ; Excel d'évaluation de la file
+  enregistré à côté de la liste importée.
 - **File d'attente** : *Ajouter à la file* (onglet Recherche) ou *Importer une liste (Excel)*
   (modèle créé par *Créer le modèle Excel…*, une colonne par filtre) préparent plusieurs
   recherches ; un clic sur une recherche affiche son journal ;
@@ -79,11 +82,11 @@ Si une nouvelle version du script importe une bibliothèque absente du Python in
 
 **Linux (.deb)** : `./packaging/linux/build_deb.sh` → `dist/pubmed-search-gui_<version>_amd64.deb`
 
-**Windows (.exe) depuis Linux** (méthode utilisée pour la 1.5.0) : Python Windows
+**Windows (.exe) depuis Linux** (méthode utilisée pour la 1.6.0) : Python Windows
 (python-build-standalone, `uv python install cpython-3.11-windows-x86_64-none`) exécuté sous
 Wine pour PyInstaller (`wine python.exe -m PyInstaller --workpath build-win --distpath dist-win
 pubmed_gui.spec`, sortie redirigée par un tube `| cat`), puis
-`makensis -DVERSION=1.5.0 -DSRCDIR=../../dist-win/PubMedSearch packaging/windows/installer.nsi`
+`makensis -DVERSION=1.6.0 -DSRCDIR=../../dist-win/PubMedSearch packaging/windows/installer.nsi`
 (NSIS, installateur 64 bits pour Windows 10/11).
 
 **Windows (.exe)**, sur un PC Windows avec Python 3.10+ :

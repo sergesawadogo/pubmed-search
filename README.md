@@ -13,10 +13,10 @@ Page des téléchargements : **[Dernière version](https://github.com/sergesawad
 
 | Fichier | Pour |
 |---|---|
-| `PubMedSearch-Setup-1.5.0.exe` | Windows 10 et 11 (64 bits) |
-| `PubMedSearch-1.5.0-macOS-AppleSilicon.dmg` | Mac à puce Apple (M1, M2, M3, M4…), macOS 12 Monterey ou plus récent |
-| `PubMedSearch-1.5.0-macOS-Intel.dmg` | Mac à processeur Intel, macOS 12 Monterey ou plus récent |
-| `pubmed-search-gui_1.5.0_amd64.deb` | Ubuntu 20.04+, Debian 10+, Linux Mint 20+ (64 bits) |
+| `PubMedSearch-Setup-1.6.0.exe` | Windows 10 et 11 (64 bits) |
+| `PubMedSearch-1.6.0-macOS-AppleSilicon.dmg` | Mac à puce Apple (M1, M2, M3, M4…), macOS 12 Monterey ou plus récent |
+| `PubMedSearch-1.6.0-macOS-Intel.dmg` | Mac à processeur Intel, macOS 12 Monterey ou plus récent |
+| `pubmed-search-gui_1.6.0_amd64.deb` | Ubuntu 20.04+, Debian 10+, Linux Mint 20+ (64 bits) |
 | `envoyer-vers-pubmed-search-1.0.0.xpi` | Extension Firefox (facultative) |
 | `SHA256SUMS.txt`, `SHA256SUMS-macOS.txt` | Empreintes pour vérifier les fichiers |
 
@@ -28,7 +28,7 @@ Rien d'autre à installer : Python et ses bibliothèques sont inclus dans l'appl
 
 ### Windows 10 / 11
 
-1. Téléchargez `PubMedSearch-Setup-1.5.0.exe` et double-cliquez dessus.
+1. Téléchargez `PubMedSearch-Setup-1.6.0.exe` et double-cliquez dessus.
 2. Windows affiche « Windows a protégé votre ordinateur » : l'installateur n'est pas signé
    numériquement. Cliquez sur **Informations complémentaires**, puis **Exécuter quand même**.
 3. Acceptez la demande d'autorisation administrateur, choisissez le dossier, terminez.
@@ -59,7 +59,7 @@ Vos réglages (`~/Library/Preferences/pubmed-search-gui`) sont conservés.
 
 ```bash
 cd ~/Téléchargements
-sudo apt install ./pubmed-search-gui_1.5.0_amd64.deb
+sudo apt install ./pubmed-search-gui_1.6.0_amd64.deb
 ```
 
 `apt` installe aussi les bibliothèques graphiques nécessaires. Lancez **PubMed Search**
@@ -132,6 +132,21 @@ Ouvrez l'onglet **Réglages** :
    proprement (les résultats déjà obtenus sont enregistrés).
 
 ![Filtres et requête finale](docs/captures/filtres.png)
+
+### Évaluer une recherche avant de la lancer
+
+Le bouton **Évaluer** (onglet Recherche) interroge PubMed sans rien télécharger et affiche,
+pour tous les résultats et pour ceux qui seront réellement traités (le maximum choisi, selon
+le tri) : le nombre d'articles **gratuits** (filtre PubMed *free full text*), dont ceux
+disponibles dans **PMC** (presque toujours téléchargés), et le nombre d'articles **payants**.
+Il signale aussi les termes que PubMed n'a pas reconnus, montre la requête telle que PubMed
+l'a comprise et conseille d'affiner si trop d'articles seraient laissés de côté. Vous
+choisissez ensuite : **Lancer la recherche**, **Ajouter à la file** ou **Affiner la requête**.
+
+Dans l'onglet **File d'attente**, **Évaluer la file** fait de même pour toutes les recherches
+en attente (ou pour la recherche terminée sélectionnée) : le résultat s'affiche dans la colonne
+*Évaluation* et un Excel `NomDeLaListe_evaluation_JJ.MM.AAAA_HHhMM.xlsx` est enregistré dans le
+dossier du fichier Excel importé (sinon, l'application demande où l'enregistrer).
 
 ### Ce que vous obtenez
 

@@ -19,7 +19,7 @@ import threading
 
 APP_NAME = "PubMed Search"
 APP_ID = "pubmed-search-gui"
-APP_VERSION = "1.5.0"
+APP_VERSION = "1.6.0"
 
 
 # --------------------------------------------------------------------------- #
@@ -391,6 +391,113 @@ class Stat(QWidget):
 
     def show(self, v):
         self.value.setText(str(v))
+
+
+def eval_advice(ev):
+    """Conseils lisibles à partir d'une évaluation (dict produit par --evaluate)."""
+    tips = []
+    tot, proc, mx = ev.get("total", 0), ev.get("processed", 0), ev.get("max", 0)
+    fmt = lambda n: f"{n:,}".replace(",", " ")  # noqa: E731
+    if ev.get("error"):
+        return [f"Évaluation impossible : {ev['error']}"]
+    if tot == 0:
+        tips.append("Aucun résultat : vérifiez l'orthographe, les guillemets et les champs ([ti], [tiab]…).")
+    if tot > proc:
+        tips.append(f"Seuls {fmt(proc)} des {fmt(tot)} articles seront traités (maximum {fmt(mx)} par tri) : affinez la "
+                    "requête (filtres, type d'article, période) ou augmentez le maximum.")
+    if tot > 10000:
+        tips.append("PubMed ne renvoie que les 10 000 premiers articles de chaque tri.")
+    if ev.get("warnings"):
+        tips.append("PubMed signale : " + " ; ".join(ev["warnings"]))
+    if proc and ev.get("free_processed", 0) == 0:
+        tips.append("Aucun article gratuit parmi ceux qui seront traités : aucun PDF ne sera téléchargé.")
+    return tips
+
+
+def eval_short(ev):
+    if not ev:
+        return ""
+    if ev.get("error"):
+        return "évaluation impossible"
+    fmt = lambda n: f"{n:,}".replace(",", " ")  # noqa: E731
+    return (f"{fmt(ev.get('total', 0))} → {fmt(ev.get('processed', 0))} "
+            f"({fmt(ev.get('free_processed', 0))} gratuits)")
+
+
+class EvalDialog(QDialog):
+    """Résultat de l'évaluation d'une requête : lancer, mettre en file ou affiner."""
+    RUN, QUEUE, REFINE = 1, 2, 0
+
+    def __init__(self, parent, ev, sort_label):
+        super().__init__(parent)
+        self.setWindowTitle("Évaluation de la recherche")
+        self.setMinimumWidth(640)
+        self.choice = self.REFINE
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(24, 20, 24, 20)
+        lay.setSpacing(10)
+        title = QLabel("Évaluation de la recherche")
+        title.setObjectName("sectionTitle")
+        lay.addWidget(title)
+        pct = lambda a, b: f"{100 * a / b:.0f} %" if b else "–"  # noqa: E731
+        tot, proc = ev.get("total", 0), ev.get("processed", 0)
+        ft, fp = ev.get("free_total", 0), ev.get("free_processed", 0)
+        pt, pp = ev.get("pmc_total", 0), ev.get("pmc_processed", 0)
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(28)
+        grid.setVerticalSpacing(6)
+        heads = ["", "Tous les résultats PubMed", f"À traiter ({sort_label}, max {ev.get('max', '?')})"]
+        rows = [("Articles", f"{tot:,}".replace(",", " "), f"{proc:,}".replace(",", " ")),
+                ("Gratuits (free full text)", f"{ft:,}  ({pct(ft, tot)})".replace(",", " "),
+                 f"{fp:,}  ({pct(fp, proc)})".replace(",", " ")),
+                ("   dont dans PMC", f"{pt:,}".replace(",", " "), f"{pp:,}".replace(",", " ")),
+                ("Payants (sans version gratuite signalée)", f"{tot - ft:,}".replace(",", " "),
+                 f"{proc - fp:,}".replace(",", " "))]
+        for c, h in enumerate(heads):
+            lab = QLabel(h)
+            lab.setObjectName("fieldLabel")
+            grid.addWidget(lab, 0, c)
+        for r, row in enumerate(rows, 1):
+            for c, txt in enumerate(row):
+                lab = QLabel(txt)
+                if c and r == 2:
+                    lab.setStyleSheet(f"color:{C['ok']}; font-weight:700;")
+                if c and r == 4:
+                    lab.setStyleSheet(f"color:{C['eosin']}; font-weight:600;")
+                grid.addWidget(lab, r, c, alignment=Qt.AlignRight if c else Qt.AlignLeft)
+        lay.addLayout(grid)
+        lay.addWidget(hint("Les articles gratuits dans PMC sont presque toujours téléchargés ; les autres "
+                           "gratuits dépendent des éditeurs. Les payants ne le sont qu'exceptionnellement "
+                           "(version libre déposée ailleurs)."))
+        tips = eval_advice(ev)
+        if tips:
+            t = QLabel("\n".join("• " + x for x in tips))
+            t.setWordWrap(True)
+            t.setStyleSheet(f"color:{C['warn']};")
+            lay.addWidget(t)
+        if ev.get("translation"):
+            lay.addWidget(field_label("Requête telle que PubMed l'a comprise"))
+            tr = QPlainTextEdit(ev["translation"])
+            tr.setReadOnly(True)
+            tr.setObjectName("preview")
+            tr.setMaximumHeight(90)
+            lay.addWidget(tr)
+        btns = QHBoxLayout()
+        b_ref = QPushButton("Affiner la requête")
+        b_ref.setObjectName("secondary")
+        b_q = QPushButton("Ajouter à la file")
+        b_q.setObjectName("secondary")
+        b_run = QPushButton("Lancer la recherche")
+        b_run.setObjectName("primary")
+        for b, ch in ((b_ref, self.REFINE), (b_q, self.QUEUE), (b_run, self.RUN)):
+            b.setMinimumHeight(40)
+            b.clicked.connect(lambda _=False, ch=ch: self._pick(ch))
+            btns.addWidget(b, 2 if ch == self.RUN else 1)
+        lay.addLayout(btns)
+
+    def _pick(self, ch):
+        self.choice = ch
+        self.accept()
 
 
 class LiveLabel(QLabel):
@@ -793,6 +900,52 @@ def read_queue_excel(path, groups, defaults):
                      "sources": defaults.get("sources"), "passes": passes, "status": "attente",
                      "summary": ""})
     return jobs, problems
+
+
+def write_eval_excel(path, jobs, sorts_labels):
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.utils import get_column_letter
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Évaluation"
+    heads = ["Nom", "Requête (avec filtres)", "Tri", "Max par tri", "Résultats PubMed", "Gratuits",
+             "dont PMC", "Payants", "% gratuits", "À traiter", "Gratuits à traiter", "dont PMC à traiter",
+             "Payants à traiter", "Conseils", "Requête comprise par PubMed", "Fichier de la liste"]
+    ws.append(heads)
+    for c in ws[1]:
+        c.font = Font(bold=True, color="FFFFFF")
+        c.fill = PatternFill("solid", fgColor="3A3D8F")
+        c.alignment = Alignment(wrap_text=True, vertical="center")
+    for j in jobs:
+        ev = j.get("eval") or {}
+        tot, ft, pt = ev.get("total", 0), ev.get("free_total", 0), ev.get("pmc_total", 0)
+        pr, fp, pp = ev.get("processed", 0), ev.get("free_processed", 0), ev.get("pmc_processed", 0)
+        bad = bool(ev.get("error"))
+        ws.append([j["stem"], j["query"], sorts_labels.get(j["sort"], j["sort"]), j["max"],
+                   None if bad else tot, None if bad else ft, None if bad else pt,
+                   None if bad else tot - ft, None if bad or not tot else round(100 * ft / tot, 1),
+                   None if bad else pr, None if bad else fp, None if bad else pp,
+                   None if bad else pr - fp, "\n".join(eval_advice(ev)), ev.get("translation", ""),
+                   j.get("source", "")])
+        for c in ws[ws.max_row]:
+            c.alignment = Alignment(wrap_text=True, vertical="top")
+    for i, w in enumerate([22, 50, 12, 9, 11, 10, 10, 10, 9, 10, 10, 10, 10, 50, 50, 30], 1):
+        ws.column_dimensions[get_column_letter(i)].width = w
+    ws.freeze_panes = "B2"
+    ws.auto_filter.ref = ws.dimensions
+    ws2 = wb.create_sheet("Définitions")
+    for row in [("Gratuits", "Articles du filtre PubMed « free full text » (Free PMC article et Free article)."),
+                ("dont PMC", "Articles dont le texte intégral gratuit est dans PubMed Central (\"pubmed pmc\"[sb]) : "
+                             "presque toujours téléchargés."),
+                ("Payants", "Articles sans version gratuite signalée par PubMed."),
+                ("À traiter", "Articles réellement traités par la recherche : les « max » premiers de chaque tri "
+                              "(union des deux tris si « Les deux »)."),
+                ("Date", QDateTime.currentDateTime().toString("dd/MM/yyyy HH:mm"))]:
+        ws2.append(list(row))
+    ws2.column_dimensions["A"].width = 16
+    ws2.column_dimensions["B"].width = 110
+    wb.save(path)
 
 
 # sources optionnelles du script (--sources) : clé, libellé, info-bulle
@@ -1452,6 +1605,13 @@ class MainWindow(QMainWindow):
         self.run_btn.setObjectName("primary")
         self.run_btn.setMinimumHeight(44)
         self.run_btn.clicked.connect(self._start_search)
+        self.eval_btn = QPushButton("Évaluer")
+        self.eval_btn.setObjectName("secondary")
+        self.eval_btn.setMinimumHeight(44)
+        self.eval_btn.setToolTip("Compter les résultats PubMed (gratuits / payants) sans rien télécharger, "
+                                 "puis lancer, mettre en file ou affiner")
+        self.eval_btn.clicked.connect(self._evaluate_form)
+        brow.addWidget(self.eval_btn, 1)
         brow.addWidget(self.add_queue_btn, 1)
         brow.addWidget(self.run_btn, 2)
         lay.addLayout(brow)
@@ -1756,13 +1916,20 @@ class MainWindow(QMainWindow):
         self.q_template.clicked.connect(self._queue_make_template)
         irow.addWidget(self.q_import)
         irow.addWidget(self.q_template)
+        self.q_eval = QPushButton("Évaluer la file")
+        self.q_eval.setObjectName("secondary")
+        self.q_eval.setToolTip("Compte les résultats (gratuits / payants) de chaque recherche en attente, "
+                               "sans rien télécharger, et enregistre un Excel d'évaluation")
+        self.q_eval.clicked.connect(self._queue_evaluate)
+        irow.addWidget(self.q_eval)
         irow.addStretch(1)
         lay.addSpacing(6)
         lay.addLayout(irow)
         lay.addSpacing(12)
-        self.qtable = QTableWidget(0, 5)
+        self.qtable = QTableWidget(0, 6)
         self.qtable.setObjectName("queue")
-        self.qtable.setHorizontalHeaderLabels(["État", "Fichier Excel", "Requête", "Tri / max", "Résultat"])
+        self.qtable.setHorizontalHeaderLabels(["État", "Fichier Excel", "Requête", "Tri / max", "Évaluation",
+                                               "Résultat"])
         self.qtable.verticalHeader().hide()
         self.qtable.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.qtable.setSelectionMode(QAbstractItemView.SingleSelection)
@@ -1771,7 +1938,7 @@ class MainWindow(QMainWindow):
         self.qtable.setShowGrid(False)
         self.qtable.setAlternatingRowColors(True)
         hh = self.qtable.horizontalHeader()
-        for c, wdt in ((0, 84), (1, 150), (3, 112), (4, 104)):
+        for c, wdt in ((0, 84), (1, 150), (3, 112), (4, 150), (5, 104)):
             hh.setSectionResizeMode(c, QHeaderView.Interactive)
             self.qtable.setColumnWidth(c, wdt)
         hh.setSectionResizeMode(2, QHeaderView.Stretch)
@@ -1954,6 +2121,16 @@ class MainWindow(QMainWindow):
             self.log.setPlaceholderText("")
             self._append("Cette recherche n'a pas encore été lancée.\n", "dim", record=False)
             self._append(f"Requête : {job['query']}\n", "dim", record=False)
+            ev = job.get("eval")
+            if ev and not ev.get("error"):
+                self._append(f"\nÉvaluation : {ev['total']} résultats PubMed (gratuits {ev['free_total']}, "
+                             f"dont PMC {ev['pmc_total']}) ; à traiter {ev['processed']} (gratuits "
+                             f"{ev['free_processed']}, dont PMC {ev['pmc_processed']}, payants "
+                             f"{ev['processed'] - ev['free_processed']}).\n", "pdf", record=False)
+                for t in eval_advice(ev):
+                    self._append(f"  • {t}\n", "warn", record=False)
+            elif not ev:
+                self._append("\nPas encore évaluée : bouton « Évaluer la file ».\n", "dim", record=False)
         else:
             self._append("Journal indisponible pour cette recherche (lancée avec une version "
                          "antérieure de l'application).\n", "dim", record=False)
@@ -2010,6 +2187,7 @@ class MainWindow(QMainWindow):
             return
         existing = {j["stem"] for j in self.queue}
         for j in jobs:
+            j["source"] = path
             if j["stem"] in existing:
                 problems.append(f"« {j['stem']} » : ce nom est déjà dans la file (les résultats iront "
                                 "dans des dossiers distincts, horodatés).")
@@ -2028,6 +2206,140 @@ class MainWindow(QMainWindow):
             box.setInformativeText("\n".join(problems[:8]) + ("\n…" if len(problems) > 8 else ""))
             box.exec()
 
+    # ------------------------------------------------ évaluation (sans téléchargement)
+    def _eval_run(self, query, mx, sort, done):
+        """Lance pubmed_search.py --evaluate dans un processus séparé ; done(dict) à la fin."""
+        script = self.script_path.text().strip()
+        if "--evaluate" not in self.script_flags and self.script_flags:
+            done({"query": query, "error": "le script choisi ne connaît pas --evaluate (version < 1.9.0)"})
+            return
+        args = [query, "--evaluate", "--max-results", str(mx), "--email", self.email.text().strip()]
+        if sort in ("best", "both"):
+            args.append("--best-match")
+        if sort in ("recent", "both"):
+            args.append("--most-recent")
+        prog, full = self._python_cmd(script, args)
+        proc = QProcess(self)
+        proc.setProcessChannelMode(QProcess.MergedChannels)
+        proc.setProcessEnvironment(self._env())
+        proc.setWorkingDirectory(os.path.dirname(script))
+        self._eval_procs = getattr(self, "_eval_procs", [])
+        self._eval_procs.append(proc)
+
+        def finished(*_):
+            out = bytes(proc.readAll()).decode("utf-8", "replace")
+            m = re.search(r"^EVAL_JSON: (\{.*\})\s*$", out, re.M)
+            try:
+                ev = json.loads(m.group(1)) if m else {"query": query, "error": out.strip()[-300:] or
+                                                       "pas de réponse du script"}
+            except ValueError:
+                ev = {"query": query, "error": "réponse illisible"}
+            ev.setdefault("max", mx)
+            if proc in self._eval_procs:
+                self._eval_procs.remove(proc)
+            proc.deleteLater()
+            done(ev)
+        proc.finished.connect(finished)
+        proc.errorOccurred.connect(lambda e: e == QProcess.FailedToStart and finished())
+        proc.start(prog, full)
+
+    def _script_ok(self):
+        """Script présent (l'évaluation peut tourner pendant une recherche)."""
+        script = self.script_path.text().strip()
+        if not script or not os.path.exists(script):
+            self.tabs.setCurrentIndex(self.TAB_SETTINGS)
+            QMessageBox.warning(self, "Script introuvable", "Choisissez le fichier pubmed_search.py dans Réglages.")
+            return None
+        return script
+
+    def _evaluate_form(self):
+        script = self._script_ok()
+        if not script or not self._check_email():
+            return
+        q = self._final_query()
+        if not q:
+            self._set_error(self.err_query, "Saisissez une requête PubMed ou cochez au moins un filtre.",
+                            self.query)
+            return
+        self.eval_btn.setEnabled(False)
+        self.eval_btn.setText("Évaluation…")
+        self.queue_note.setText("Interrogation de PubMed (quelques secondes)…")
+        sort = self._sort_key()
+
+        def done(ev):
+            self.eval_btn.setEnabled(True)
+            self.eval_btn.setText("Évaluer")
+            self.queue_note.setText("")
+            if ev.get("error"):
+                QMessageBox.warning(self, "Évaluation", "Évaluation impossible :\n" + ev["error"])
+                return
+            self._last_eval = (q, sort, self.max_results.value(), ev)
+            dlg = EvalDialog(self, ev, self.SORTS.get(sort, sort).lower())
+            dlg.exec()
+            if dlg.choice == EvalDialog.RUN:
+                self._start_search()
+            elif dlg.choice == EvalDialog.QUEUE:
+                self._add_to_queue()
+            else:
+                self.query.setFocus()
+        self._eval_run(q, self.max_results.value(), sort, done)
+
+    def _queue_evaluate(self):
+        script = self._script_ok()
+        if not script or not self._check_email():
+            return
+        todo = [j for j in self.queue if j["status"] == "attente"]
+        r = self._queue_sel()
+        if r >= 0 and self.queue[r]["status"] != "attente":
+            todo = [self.queue[r]]          # recherche terminée sélectionnée : la réévaluer seule
+        if not todo:
+            self.q_status.setText("Aucune recherche en attente à évaluer.")
+            return
+        self.q_eval.setEnabled(False)
+        state = {"i": 0}
+
+        def step(ev=None):
+            if ev is not None:
+                todo[state["i"]]["eval"] = ev
+                state["i"] += 1
+                self._queue_refresh()
+            if state["i"] < len(todo):
+                j = todo[state["i"]]
+                self.q_status.setText(f"Évaluation {state['i'] + 1} sur {len(todo)} : {j['stem']}…")
+                self._eval_run(j["query"], j["max"], j["sort"], step)
+                return
+            self.q_eval.setEnabled(True)
+            self._save_settings()
+            path = self._write_queue_eval(todo)
+            n_err = sum(1 for j in todo if j["eval"].get("error"))
+            self.q_status.setText(f"{len(todo)} recherche(s) évaluée(s)"
+                                  + (f", dont {n_err} en échec" if n_err else "")
+                                  + (f". Excel : {path}" if path else "."))
+        step()
+
+    def _write_queue_eval(self, jobs):
+        """Excel d'évaluation, enregistré à côté du fichier Excel de la liste importée."""
+        stamp = QDateTime.currentDateTime().toString("dd.MM.yyyy_HH'h'mm")
+        src = next((j["source"] for j in jobs if j.get("source")), "")
+        if src and os.path.isdir(os.path.dirname(src)):
+            path = os.path.join(os.path.dirname(src),
+                                f"{os.path.splitext(os.path.basename(src))[0]}_evaluation_{stamp}.xlsx")
+        else:
+            start = os.path.join(QStandardPaths.writableLocation(QStandardPaths.DocumentsLocation)
+                                 or os.path.expanduser("~"), f"Evaluation_file_{stamp}.xlsx")
+            path, _ = QFileDialog.getSaveFileName(self, "Enregistrer l'évaluation de la file", start,
+                                                  "Excel (*.xlsx)")
+            if not path:
+                return ""
+            if not path.lower().endswith(".xlsx"):
+                path += ".xlsx"
+        try:
+            write_eval_excel(path, jobs, self.SORTS)
+        except Exception as e:  # noqa
+            QMessageBox.warning(self, "Évaluation", f"Écriture de l'Excel impossible :\n{e}")
+            return ""
+        return path
+
     def _queue_refresh(self):
         self.qtable.setRowCount(len(self.queue))
         colors = {"cours": C["hema"], "ok": C["ok"], "erreur": C["err"], "arret": C["warn"]}
@@ -2037,11 +2349,13 @@ class MainWindow(QMainWindow):
                      (job.get("base_query") or "(filtres seuls)") + filt,
                      f'{self.SORTS.get(job["sort"], job["sort"])} / {job["max"]}'
                      + ("" if job["getpdf"] else " / sans PDF") + (" / JSON" if job.get("getjson") else ""),
-                     job.get("summary", "")]
+                     eval_short(job.get("eval")), job.get("summary", "")]
             for c, text in enumerate(cells):
                 it = QTableWidgetItem(text)
                 if c == 2:
                     it.setToolTip(job["query"])
+                if c == 4 and job.get("eval"):
+                    it.setToolTip("\n".join(eval_advice(job["eval"])) or "Rien à signaler")
                 if c == 0:
                     f = it.font()
                     f.setBold(True)
@@ -2074,6 +2388,9 @@ class MainWindow(QMainWindow):
         job = self._collect_job()
         if not job:
             return
+        le = getattr(self, "_last_eval", None)
+        if le and le[0] == job["query"] and le[1] == job["sort"] and le[2] == job["max"]:
+            job["eval"] = le[3]
         self.queue.append(job)
         self._queue_refresh()
         self._save_settings()
@@ -2688,7 +3005,7 @@ class MainWindow(QMainWindow):
             else:
                 missing = [f for f in ("--core-key", "--elsevier-key", "--openalex-key", "--import-pdf",
                                        "--time-set", "--getjson", "--sources", "--springer-oa-key",
-                                       "--springer-meta-key", "--identify-pdf") if f not in flags]
+                                       "--springer-meta-key", "--identify-pdf", "--evaluate") if f not in flags]
                 txt = f"Version {ver}, prête."
                 if missing:
                     txt += " Options absentes de cette version : " + ", ".join(missing) + "."
@@ -2705,6 +3022,8 @@ class MainWindow(QMainWindow):
             self.k_oa.setEnabled("--openalex-key" in flags)
             self.imp_btn.setEnabled("--import-pdf" in flags)
             self.idf_btn.setEnabled("--identify-pdf" in flags)
+            self.eval_btn.setEnabled("--evaluate" in flags)
+            self.q_eval.setEnabled("--evaluate" in flags)
             self.schedule.setEnabled("--time-set" in flags)
             probe.deleteLater()
 

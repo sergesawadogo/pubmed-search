@@ -72,7 +72,7 @@ try:  # optionnel : lecture du texte des PDF (--import-pdf, contrôle API Elsevi
 except ImportError:
     PdfReader = None
 
-VERSION = "1.8.0"
+VERSION = "1.9.0"
 TOOL_NAME = "pubmed_search_py"
 DEFAULT_EMAIL = "sergesawadogo@gmail.com"
 
@@ -2368,6 +2368,86 @@ def run_identify(src_dir, output, outdir, http):
 
 
 # --------------------------------------------------------------------------- #
+# Mode évaluation : combien d'articles, gratuits ou non, avant de lancer la recherche
+# --------------------------------------------------------------------------- #
+def _esearch_raw(http, term, sort="relevance", retmax=0, webenv=None, query_key=None):
+    data = http.ncbi(db="pubmed", term=term, sort=sort, retmax=retmax, retmode="json")
+    if webenv:
+        data.update(WebEnv=webenv, usehistory="y")
+    r = http.request("POST", EUTILS + "esearch.fcgi", "ncbi", data=data)
+    r.raise_for_status()
+    j = r.json().get("esearchresult", {})
+    if "ERROR" in j:
+        raise RuntimeError(f"PubMed : {j['ERROR']}")
+    return j
+
+
+def evaluate_query(http, query, max_results, sorts):
+    """Comptes PubMed d'une requête : tous les résultats et ceux qui seront traités
+    (max_results premiers de chaque tri). « Gratuits » = filtre PubMed free full text[sb]
+    (Free PMC article + Free article) ; « dont PMC » = "pubmed pmc"[sb] (aide PubMed)."""
+    FREE, PMC = "free full text[sb]", "\"pubmed pmc\"[sb]"
+    q = f"({query})"
+    j = _esearch_raw(http, query)
+    out = {"query": query, "total": int(j.get("count", 0)),
+           "translation": j.get("querytranslation", ""), "warnings": []}
+    for k in ("phrasesignored", "quotedphrasesnotfound", "outputmessages"):
+        v = (j.get("warninglist") or {}).get(k)
+        if v:
+            out["warnings"].append(f"{k} : {', '.join(v) if isinstance(v, list) else v}")
+    v = (j.get("errorlist") or {}).get("phrasesnotfound")
+    if v:
+        out["warnings"].append("termes non trouvés : " + ", ".join(v))
+    out["free_total"] = int(_esearch_raw(http, f"{q} AND {FREE}").get("count", 0))
+    out["pmc_total"] = int(_esearch_raw(http, f"{q} AND {PMC}").get("count", 0))
+    ids = []
+    for sort in sorts:
+        ids += _esearch_raw(http, query, sort, max_results).get("idlist", [])
+    ids = list(OrderedDict.fromkeys(ids))
+    out["processed"] = len(ids)
+    out["free_processed"] = out["pmc_processed"] = 0
+    if ids:
+        if out["processed"] == out["total"]:
+            out["free_processed"], out["pmc_processed"] = out["free_total"], out["pmc_total"]
+        else:
+            r = http.request("POST", EUTILS + "epost.fcgi", "ncbi",
+                             data=http.ncbi(db="pubmed", id=",".join(ids)))
+            r.raise_for_status()
+            root = ET.fromstring(r.content)
+            env, key = root.findtext("WebEnv"), root.findtext("QueryKey")
+            for name, sub in (("free_processed", FREE), ("pmc_processed", PMC)):
+                out[name] = int(_esearch_raw(http, f"#{key} AND {sub}", webenv=env).get("count", 0))
+    return out
+
+
+def run_evaluate(args):
+    http = Http(args.email, args.api_key, timeout=args.timeout)
+    sorts = []
+    if args.best_match or not args.most_recent:
+        sorts.append("relevance")
+    if args.most_recent:
+        sorts.append("pub_date")
+    try:
+        ev = evaluate_query(http, args.query, args.max_results, sorts)
+    except Exception as e:  # noqa
+        print("EVAL_JSON: " + json.dumps({"query": args.query, "error": f"{type(e).__name__} : {e}"},
+                                         ensure_ascii=False), flush=True)
+        return 1
+    ev["max"] = args.max_results
+    ev["sorts"] = ["best" if x == "relevance" else "recent" for x in sorts]
+    pct = lambda a, b: f"{100 * a / b:.0f} %" if b else "-"  # noqa: E731
+    log(f"Évaluation de : {args.query}")
+    log(f"  Résultats PubMed     : {ev['total']}  (gratuits {ev['free_total']} = {pct(ev['free_total'], ev['total'])}, "
+        f"dont PMC {ev['pmc_total']} ; payants {ev['total'] - ev['free_total']})")
+    log(f"  Articles à traiter   : {ev['processed']}  (gratuits {ev['free_processed']}, dont PMC "
+        f"{ev['pmc_processed']} ; payants {ev['processed'] - ev['free_processed']})")
+    for w in ev["warnings"]:
+        log(f"  ⚠ {w}")
+    print("EVAL_JSON: " + json.dumps(ev, ensure_ascii=False), flush=True)
+    return 0
+
+
+# --------------------------------------------------------------------------- #
 # Programme principal
 # --------------------------------------------------------------------------- #
 SECRET_FLAGS = ("--api-key", "--openalex-key", "--elsevier-key", "--core-key", "--springer-oa-key",
@@ -2646,6 +2726,10 @@ def build_parser():
     p.add_argument("--outdir", default=None,
                    help="dossier parent des résultats (défaut : dossier courant ; avec "
                         "--identify-pdf : le dossier des PDF)")
+    p.add_argument("--evaluate", action="store_true",
+                   help="évaluer la requête sans rien télécharger : nombre de résultats PubMed, "
+                        "gratuits (dont PMC) et payants, au total et parmi les articles qui seraient "
+                        "traités (--max-results, tri). Dernière ligne : EVAL_JSON {…}")
     p.add_argument("--identify-pdf", metavar="DOSSIER",
                    help="identifier les PDF d'un dossier quelconque (DOI, PMID ou titre -> PubMed, "
                         "sinon Crossref) : copies renommées PMID-Auteur(Année).pdf, Excel des "
@@ -2671,6 +2755,12 @@ def main():
         http = Http(args.email, args.api_key, timeout=args.timeout)
         return run_identify(args.identify_pdf, args.output, args.outdir, http)
     args.outdir = args.outdir or "."
+    if args.evaluate:
+        if not args.query:
+            parser.error("--evaluate nécessite la requête")
+        if not 1 <= args.max_results <= 10000:
+            sys.exit("--max-results doit être compris entre 1 et 10000 (limite ESearch de NCBI).")
+        return run_evaluate(args)
     if not args.query or not args.output:
         parser.error("une recherche nécessite la requête et --output")
     if not args.output.lower().endswith(".xlsx"):
