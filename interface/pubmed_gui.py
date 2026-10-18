@@ -19,7 +19,7 @@ import threading
 
 APP_NAME = "PubMed Search"
 APP_ID = "pubmed-search-gui"
-APP_VERSION = "1.6.0"
+APP_VERSION = "1.6.1"
 
 
 # --------------------------------------------------------------------------- #
@@ -389,7 +389,8 @@ class Stat(QWidget):
         if not self.muted:
             self.value.setText(str(v))
 
-    def show(self, v):
+    def show_value(self, v):
+        # (ne pas nommer « show » : masquerait QWidget.show())
         self.value.setText(str(v))
 
 
@@ -2077,7 +2078,7 @@ class MainWindow(QMainWindow):
             self._viewing = None
             for wdg in widgets:
                 wdg.muted = False
-                wdg.show(wdg.live)
+                wdg.show_value(wdg.live)
             self.phase.muted = False
             self.phase.show_text(self.phase.live)
             self.s_json.setVisible(getattr(self, "_live_json_vis", False))
@@ -2100,11 +2101,11 @@ class MainWindow(QMainWindow):
             wdg.muted = True
         st = job.get("stats") or {}
         waiting = job["status"] == "attente"
-        self.s_ok.show(st.get("ok", "–"))
-        self.s_miss.show(st.get("miss", "–"))
-        self.s_left.show(st.get("left", "–"))
-        self.s_rate.show(st.get("rate", "–"))
-        self.s_json.show(st.get("json", "–"))
+        self.s_ok.show_value(st.get("ok", "–"))
+        self.s_miss.show_value(st.get("miss", "–"))
+        self.s_left.show_value(st.get("left", "–"))
+        self.s_rate.show_value(st.get("rate", "–"))
+        self.s_json.show_value(st.get("json", "–"))
         self.s_json.setVisible(bool(st.get("json_shown")))
         self.strip.show_values(*(st.get("strip") or (0, 0, 0)))
         self.phase.show_text(st.get("phase") or ("En attente dans la file." if waiting
@@ -2996,7 +2997,10 @@ class MainWindow(QMainWindow):
         probe.setProcessEnvironment(self._env())
 
         def done(*_):
-            out = bytes(probe.readAll()).decode("utf-8", "replace")
+            try:
+                out = bytes(probe.readAll()).decode("utf-8", "replace")
+            except RuntimeError:      # fenêtre fermée avant la fin de la vérification
+                return
             flags = set(re.findall(r"(--[a-z][a-z0-9\-]+)", out))
             self.script_flags = flags
             if "--output" not in flags:
@@ -3028,8 +3032,12 @@ class MainWindow(QMainWindow):
             probe.deleteLater()
 
         probe.finished.connect(done)
-        probe.errorOccurred.connect(lambda *_: self.script_status.setText(
-            "Impossible de lancer l'interpréteur Python choisi."))
+        def failed(*_):
+            try:
+                self.script_status.setText("Impossible de lancer l'interpréteur Python choisi.")
+            except RuntimeError:
+                pass
+        probe.errorOccurred.connect(failed)
         probe.start(prog, args)
 
     @staticmethod

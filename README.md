@@ -13,10 +13,10 @@ Page des téléchargements : **[Dernière version](https://github.com/sergesawad
 
 | Fichier | Pour |
 |---|---|
-| `PubMedSearch-Setup-1.6.0.exe` | Windows 10 et 11 (64 bits) |
-| `PubMedSearch-1.6.0-macOS-AppleSilicon.dmg` | Mac à puce Apple (M1, M2, M3, M4…), macOS 12 Monterey ou plus récent |
-| `PubMedSearch-1.6.0-macOS-Intel.dmg` | Mac à processeur Intel, macOS 12 Monterey ou plus récent |
-| `pubmed-search-gui_1.6.0_amd64.deb` | Ubuntu 20.04+, Debian 10+, Linux Mint 20+ (64 bits) |
+| `PubMedSearch-Setup-1.6.1.exe` | Windows 10 et 11 (64 bits) |
+| `PubMedSearch-1.6.1-macOS-AppleSilicon.dmg` | Mac à puce Apple (M1, M2, M3, M4…), macOS 12 Monterey ou plus récent |
+| `PubMedSearch-1.6.1-macOS-Intel.dmg` | Mac à processeur Intel, macOS 12 Monterey ou plus récent |
+| `pubmed-search-gui_1.6.1_amd64.deb` | Ubuntu 20.04+, Debian 10+, Linux Mint 20+ (64 bits) |
 | `envoyer-vers-pubmed-search-1.0.0.xpi` | Extension Firefox (facultative) |
 | `SHA256SUMS.txt`, `SHA256SUMS-macOS.txt` | Empreintes pour vérifier les fichiers |
 
@@ -28,7 +28,7 @@ Rien d'autre à installer : Python et ses bibliothèques sont inclus dans l'appl
 
 ### Windows 10 / 11
 
-1. Téléchargez `PubMedSearch-Setup-1.6.0.exe` et double-cliquez dessus.
+1. Téléchargez `PubMedSearch-Setup-1.6.1.exe` et double-cliquez dessus.
 2. Windows affiche « Windows a protégé votre ordinateur » : l'installateur n'est pas signé
    numériquement. Cliquez sur **Informations complémentaires**, puis **Exécuter quand même**.
 3. Acceptez la demande d'autorisation administrateur, choisissez le dossier, terminez.
@@ -59,7 +59,7 @@ Vos réglages (`~/Library/Preferences/pubmed-search-gui`) sont conservés.
 
 ```bash
 cd ~/Téléchargements
-sudo apt install ./pubmed-search-gui_1.6.0_amd64.deb
+sudo apt install ./pubmed-search-gui_1.6.1_amd64.deb
 ```
 
 `apt` installe aussi les bibliothèques graphiques nécessaires. Lancez **PubMed Search**
