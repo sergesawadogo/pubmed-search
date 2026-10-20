@@ -13,10 +13,10 @@ Page des téléchargements : **[Dernière version](https://github.com/sergesawad
 
 | Fichier | Pour |
 |---|---|
-| `PubMedSearch-Setup-1.6.1.exe` | Windows 10 et 11 (64 bits) |
-| `PubMedSearch-1.6.1-macOS-AppleSilicon.dmg` | Mac à puce Apple (M1, M2, M3, M4…), macOS 12 Monterey ou plus récent |
-| `PubMedSearch-1.6.1-macOS-Intel.dmg` | Mac à processeur Intel, macOS 12 Monterey ou plus récent |
-| `pubmed-search-gui_1.6.1_amd64.deb` | Ubuntu 20.04+, Debian 10+, Linux Mint 20+ (64 bits) |
+| `PubMedSearch-Setup-1.7.0.exe` | Windows 10 et 11 (64 bits) |
+| `PubMedSearch-1.7.0-macOS-AppleSilicon.dmg` | Mac à puce Apple (M1, M2, M3, M4…), macOS 12 Monterey ou plus récent |
+| `PubMedSearch-1.7.0-macOS-Intel.dmg` | Mac à processeur Intel, macOS 12 Monterey ou plus récent |
+| `pubmed-search-gui_1.7.0_amd64.deb` | Ubuntu 20.04+, Debian 10+, Linux Mint 20+ (64 bits) |
 | `envoyer-vers-pubmed-search-1.0.0.xpi` | Extension Firefox (facultative) |
 | `SHA256SUMS.txt`, `SHA256SUMS-macOS.txt` | Empreintes pour vérifier les fichiers |
 
@@ -28,7 +28,7 @@ Rien d'autre à installer : Python et ses bibliothèques sont inclus dans l'appl
 
 ### Windows 10 / 11
 
-1. Téléchargez `PubMedSearch-Setup-1.6.1.exe` et double-cliquez dessus.
+1. Téléchargez `PubMedSearch-Setup-1.7.0.exe` et double-cliquez dessus.
 2. Windows affiche « Windows a protégé votre ordinateur » : l'installateur n'est pas signé
    numériquement. Cliquez sur **Informations complémentaires**, puis **Exécuter quand même**.
 3. Acceptez la demande d'autorisation administrateur, choisissez le dossier, terminez.
@@ -59,7 +59,7 @@ Vos réglages (`~/Library/Preferences/pubmed-search-gui`) sont conservés.
 
 ```bash
 cd ~/Téléchargements
-sudo apt install ./pubmed-search-gui_1.6.1_amd64.deb
+sudo apt install ./pubmed-search-gui_1.7.0_amd64.deb
 ```
 
 `apt` installe aussi les bibliothèques graphiques nécessaires. Lancez **PubMed Search**
@@ -236,7 +236,8 @@ Environ 80 % des articles gratuits sont obtenus automatiquement. Les autres sont
 par les éditeurs ou par PMC contre les téléchargements automatisés, mais restent lisibles
 dans votre navigateur :
 
-1. Onglet **Import manuel** → choisissez le dossier de résultats → **Ouvrir les 10 premiers
+1. Onglet **PDF** → sous-onglet **Importer les PDF d'une recherche PubMed Search** →
+   choisissez le dossier de résultats → **Ouvrir les 10 premiers
    liens** (puis les suivants).
 2. Enregistrez chaque PDF dans un dossier réservé à cet usage.
 3. Choisissez ce dossier puis cliquez sur **Importer les PDF** : ils sont reconnus (DOI,
@@ -245,8 +246,10 @@ dans votre navigateur :
 ### Identifier un dossier de PDF et créer sa bibliographie
 
 Pour n'importe quel dossier de PDF, même sans recherche préalable (articles reçus de
-collègues, téléchargés au fil du temps…) : onglet **Import manuel** → **Identifier un dossier
-de PDF** → choisissez le dossier, donnez un nom → **Identifier et renommer les PDF**.
+collègues, téléchargés au fil du temps…) : onglet **PDF** → sous-onglet **Renommer des PDF au
+format PubMed Search** → choisissez le dossier, donnez un nom → **Renommer les PDF et créer la
+bibliographie**. Si le dossier choisi est celui d'une recherche PubMed Search, l'application
+le signale et propose plutôt l'import (les deux usages sont faciles à confondre).
 
 Chaque PDF est retrouvé dans PubMed par le PMID ou le DOI présent dans son nom, dans ses
 propriétés ou sur sa première page, sinon par son titre ; un article absent de PubMed est
@@ -266,6 +269,35 @@ Limites : un PDF scanné (image sans texte) n'est identifié que si son nom cont
 ou son DOI (ex. `12345678.pdf` ou `10.1016_j.vaccine.2024.01.001.pdf`) ; les doublons ne
 sont copiés qu'une fois. En ligne de commande :
 `python3 pubmed_search.py --identify-pdf ~/Articles --output Ma_biblio`.
+
+---
+
+### Partager une recherche avec un collègue
+
+Onglet **Partager** :
+
+1. Choisissez le dossier de résultats (les dernières recherches sont proposées).
+2. Cochez le contenu : Excel, PDF, JSON, error.txt et listes de PMID, bibliographie Word. La
+   taille de l'archive s'affiche.
+3. Indiquez le destinataire, vérifiez l'objet et le message, choisissez la messagerie
+   (**Thunderbird** ou **Outlook** si installés) et la **limite par mail** (15 Mo par défaut :
+   l'envoi grossit les fichiers d'environ un tiers et les messageries refusent en général plus
+   de 20 à 25 Mo).
+4. **Préparer l'archive et ouvrir la messagerie** : le zip est créé dans un dossier
+   `Partage_<recherche>_<date>` à côté des résultats, et un message s'ouvre avec la pièce jointe ;
+   il ne reste qu'à vérifier et envoyer.
+
+Si l'archive dépasse la limite, deux choix :
+
+- **plusieurs archives autonomes** (un mail par archive, « partie 1 sur 3 »…) : chacune
+  s'ouvre seule ; décompressées dans un même dossier, elles recomposent la recherche complète ;
+- **une seule archive par lien** : la page de SwissTransfer (gratuit, jusqu'à 50 Go, lien
+  valable 30 jours) s'ouvre dans le navigateur ; déposez-y l'archive et collez le lien dans le
+  message préparé.
+
+Sans Thunderbird ni Outlook, l'archive est préparée et son dossier ouvert : joignez-la avec votre
+messagerie habituelle (Gmail dans le navigateur ne permet pas de joindre un fichier
+automatiquement).
 
 ---
 

@@ -72,7 +72,7 @@ try:  # optionnel : lecture du texte des PDF (--import-pdf, contrôle API Elsevi
 except ImportError:
     PdfReader = None
 
-VERSION = "1.9.0"
+VERSION = "1.9.1"
 TOOL_NAME = "pubmed_search_py"
 DEFAULT_EMAIL = "sergesawadogo@gmail.com"
 
@@ -1701,7 +1701,7 @@ def advice(articles, http, getfree):
         out.append(f"{len(els)} article(s) Elsevier non obtenu(s) : la clé est valide mais Elsevier refuse le "
                    "texte intégral hors abonnement (AUTHENTICATION_ERROR). Solutions : lancer la recherche "
                    "depuis le réseau d'une institution abonnée à ScienceDirect, ou demander à sa bibliothèque "
-                   "un jeton institutionnel (--elsevier-insttoken). Sinon : Import manuel. PMID : "
+                   "un jeton institutionnel (--elsevier-insttoken). Sinon : onglet PDF → Importer les PDF d'une recherche. PMID : "
                    + ", ".join(a.pmid for a in els))
     elif els:
         out.append(f"{len(els)} article(s) Elsevier non obtenu(s) malgré la clé : voir le détail. PMID : "
@@ -1713,7 +1713,7 @@ def advice(articles, http, getfree):
     pmc = [a for a in failed if a.pmcid and any("absent du jeu PMC" in x[3] for x in a.attempts)]
     if pmc:
         out.append(f"{len(pmc)} article(s) lisible(s) gratuitement sur PMC mais hors du sous-ensemble Open "
-                   "Access (aucune voie automatisée autorisée) : utiliser l'Import manuel. PMID : "
+                   "Access (aucune voie automatisée autorisée) : utiliser l'onglet PDF → Importer les PDF d'une recherche. PMID : "
                    + ", ".join(a.pmid for a in pmc))
     return out
 

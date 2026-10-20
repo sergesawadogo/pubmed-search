@@ -15,11 +15,12 @@ import json
 import os
 import re
 import sys
+import shutil
 import threading
 
 APP_NAME = "PubMed Search"
 APP_ID = "pubmed-search-gui"
-APP_VERSION = "1.6.1"
+APP_VERSION = "1.7.0"
 
 
 # --------------------------------------------------------------------------- #
@@ -949,6 +950,175 @@ def write_eval_excel(path, jobs, sorts_labels):
     wb.save(path)
 
 
+# --------------------------------------------------------------------------- #
+# Partage d'un dossier de résultats (zip, découpage, messagerie)
+# --------------------------------------------------------------------------- #
+SHARE_KINDS = (
+    ("excel", "Fichier(s) Excel des résultats"),
+    ("pdf", "PDF des articles"),
+    ("json", "Textes intégraux JSON"),
+    ("reports", "error.txt, listes de PMID et notes"),
+    ("word", "Bibliographie Word"),
+    ("other", "Autres fichiers"),
+)
+
+
+def scan_results(folder):
+    """Classe les fichiers d'un dossier de résultats : {type: [(chemin relatif, taille)]}."""
+    out = {k: [] for k, _ in SHARE_KINDS}
+    for root, dirs, files in os.walk(folder):
+        dirs[:] = [d for d in dirs if not d.startswith((".", "Partage_"))]
+        for f in files:
+            if f.startswith((".", "~$")):
+                continue
+            full = os.path.join(root, f)
+            rel = os.path.relpath(full, folder)
+            low = f.lower()
+            top = rel.replace("\\", "/").split("/")[0]
+            if low.endswith(".pdf"):
+                k = "pdf"
+            elif low.endswith(".json") and top.startswith("JSON_"):
+                k = "json"
+            elif low.endswith((".xlsx", ".xls", ".csv")):
+                k = "excel"
+            elif low.endswith(".docx"):
+                k = "word"
+            elif low.endswith((".txt", ".log", ".md")):
+                k = "reports"
+            else:
+                k = "other"
+            try:
+                out[k].append((rel, os.path.getsize(full)))
+            except OSError:
+                pass
+    for k in out:
+        out[k].sort()
+    return out
+
+
+def fmt_size(n):
+    for unit in ("o", "Ko", "Mo", "Go"):
+        if n < 1024 or unit == "Go":
+            return f"{n:.0f} {unit}" if unit == "o" else f"{n:.1f} {unit}".replace(".", ",")
+        n /= 1024
+
+
+def plan_parts(files, limit):
+    """Répartit [(chemin, taille, type)] en archives autonomes de taille <= limit (octets) :
+    fichiers non-PDF d'abord (dans la 1re), puis PDF du plus gros au plus petit (first-fit).
+    Un fichier plus gros que la limite occupe seul une archive."""
+    small = [f for f in files if f[2] not in ("pdf", "json")]
+    big = sorted((f for f in files if f[2] in ("pdf", "json")), key=lambda f: -f[1])
+    parts, sizes = [list(small)], [sum(f[1] for f in small)]
+    for f in big:
+        for i, sz in enumerate(sizes):
+            if sz + f[1] <= limit:
+                parts[i].append(f)
+                sizes[i] += f[1]
+                break
+        else:
+            parts.append([f])
+            sizes.append(f[1])
+    return [p for p in parts if p]
+
+
+def build_zips(folder, files, out_dir, stem, limit, state):
+    """Crée l'archive (ou les archives) ; met à jour state (done, total, error, zips)."""
+    import zipfile
+    try:
+        parts = plan_parts(files, limit) if limit else [files]
+        state["total"] = sum(f[1] for f in files) or 1
+        n = len(parts)
+        base = os.path.basename(os.path.normpath(folder))
+        readme = ("Résultats PubMed Search : " + base + "\n\n" +
+                  (f"Envoi en {n} parties. Enregistrez toutes les archives dans un même dossier, puis "
+                   "décompressez-les chacune ici : elles recomposent le dossier complet (chaque archive "
+                   "s'ouvre seule ; le fichier Excel est dans la partie 1).\n" if n > 1 else "") +
+                  "Les liens « PDF (lien local) » de l'Excel fonctionnent quand le dossier est décompressé "
+                  "en entier.\n")
+        zips = []
+        for i, part in enumerate(parts, 1):
+            name = f"{stem}.zip" if n == 1 else f"{stem}_partie{i}sur{n}.zip"
+            zp = os.path.join(out_dir, name)
+            with zipfile.ZipFile(zp, "w", zipfile.ZIP_DEFLATED, allowZip64=True) as z:
+                z.writestr(f"{base}/LISEZMOI.txt", readme)
+                for rel, size, kind in part:
+                    if state.get("cancel"):
+                        raise InterruptedError("annulé")
+                    # les PDF sont déjà compressés : stockés tels quels (bien plus rapide)
+                    ct = zipfile.ZIP_STORED if kind == "pdf" else zipfile.ZIP_DEFLATED
+                    z.write(os.path.join(folder, rel), f"{base}/{rel}", compress_type=ct)
+                    state["done"] = state.get("done", 0) + size
+            zips.append(zp)
+        state["zips"] = zips
+    except Exception as e:  # noqa
+        state["error"] = str(e) or type(e).__name__
+    finally:
+        state["finished"] = True
+
+
+def find_mail_clients():
+    """{'thunderbird': commande, 'outlook': commande} des messageries trouvées sur ce poste."""
+    import shutil as _sh
+    found = {}
+    tb = _sh.which("thunderbird")
+    cands = []
+    if sys.platform == "darwin":
+        cands = ["/Applications/Thunderbird.app/Contents/MacOS/thunderbird"]
+    elif os.name == "nt":
+        for env in ("ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"):
+            base = os.environ.get(env)
+            if base:
+                cands.append(os.path.join(base, "Mozilla Thunderbird", "thunderbird.exe"))
+    for c in cands:
+        if not tb and os.path.exists(c):
+            tb = c
+    if tb:
+        found["thunderbird"] = tb
+    if sys.platform == "darwin":
+        if os.path.exists("/Applications/Microsoft Outlook.app"):
+            found["outlook"] = "/Applications/Microsoft Outlook.app"
+    elif os.name == "nt":
+        ol = ""
+        try:
+            import winreg
+            for hive in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+                try:
+                    with winreg.OpenKey(hive, r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths"
+                                              r"\OUTLOOK.EXE") as k:
+                        ol = winreg.QueryValueEx(k, "")[0]
+                        break
+                except OSError:
+                    continue
+        except ImportError:
+            pass
+        if ol and os.path.exists(ol):
+            found["outlook"] = ol
+    return found
+
+
+def _started(r):
+    return bool(r[0]) if isinstance(r, tuple) else bool(r)
+
+
+def compose_mail(client, cmd, to, subject, body_file, body, attachments):
+    """Ouvre une fenêtre de rédaction ; renvoie True si la messagerie a été lancée."""
+    from PySide6.QtCore import QProcess as _QP
+    from urllib.parse import quote as _q
+    if client == "thunderbird":
+        opts = [f"to='{to}'", f"subject='{subject.replace(chr(39), ' ')}'", f"message='{body_file}'"]
+        if attachments:
+            opts.append("attachment='" + ",".join(QUrl.fromLocalFile(a).toString() for a in attachments) + "'")
+        return _started(_QP.startDetached(cmd, ["-compose", ",".join(opts)]))
+    if client == "outlook":
+        if sys.platform == "darwin":
+            return _started(_QP.startDetached("open", ["-a", cmd] + list(attachments)))
+        mailto = f"{to}?subject={_q(subject)}&body={_q(body[:1500])}"
+        args = (["/a", attachments[0]] if attachments else []) + ["/m", mailto]
+        return _started(_QP.startDetached(cmd, ["/c", "ipm.note"] + args))
+    return False
+
+
 # sources optionnelles du script (--sources) : clé, libellé, info-bulle
 SOURCES = (
     ("elsevier", "Elsevier", "API Elsevier (ScienceDirect, Cell, JBC) : PDF puis JSON. Clé requise."),
@@ -1322,7 +1492,7 @@ def scroll_wrap(widget):
 # --------------------------------------------------------------------------- #
 class MainWindow(QMainWindow):
     log_signal = Signal(str, str)
-    TAB_SEARCH, TAB_QUEUE, TAB_IMPORT, TAB_SETTINGS = range(4)
+    TAB_SEARCH, TAB_QUEUE, TAB_IMPORT, TAB_SHARE, TAB_SETTINGS = range(5)
 
     def __init__(self):
         super().__init__()
@@ -1366,7 +1536,8 @@ class MainWindow(QMainWindow):
         self.queue_timer.timeout.connect(self._queue_tick)
         self.tabs.addTab(scroll_wrap(self._build_search_tab()), "Recherche")
         self.tabs.addTab(scroll_wrap(self._build_queue_tab()), "File d'attente")
-        self.tabs.addTab(scroll_wrap(self._build_import_tab()), "Import manuel")
+        self.tabs.addTab(scroll_wrap(self._build_import_tab()), "PDF")
+        self.tabs.addTab(scroll_wrap(self._build_share_tab()), "Partager")
         self.tabs.addTab(scroll_wrap(self._build_settings_tab()), "Réglages")
         split.addWidget(self.tabs)
         split.addWidget(self._build_log_panel())
@@ -2552,28 +2723,66 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------- import
     def _build_import_tab(self):
+        """Deux usages bien séparés (sous-onglets) : compléter une recherche PubMed Search, ou
+        renommer des PDF venus d'ailleurs."""
+        outer = QWidget()
+        olay = QVBoxLayout(outer)
+        olay.setContentsMargins(20, 16, 20, 20)
+        olay.setSpacing(8)
+        self.pdf_tabs = QTabWidget()
+        self.pdf_tabs.setObjectName("subTabs")
+        self.pdf_tabs.addTab(self._build_import_page(), "Importer dans une recherche")
+        self.pdf_tabs.addTab(self._build_rename_page(), "Renommer des PDF")
+        olay.addWidget(self.pdf_tabs, 1)
+        return outer
+
+    @staticmethod
+    def _when_box(title, text):
+        box = QFrame()
+        box.setObjectName("whenBox")
+        lay = QVBoxLayout(box)
+        lay.setContentsMargins(14, 10, 14, 10)
+        lay.setSpacing(3)
+        t = QLabel(title)
+        t.setObjectName("whenTitle")
+        lay.addWidget(t)
+        lab = QLabel(text)
+        lab.setWordWrap(True)
+        lab.setObjectName("hint")
+        lay.addWidget(lab)
+        return box
+
+    def _build_import_page(self):
         w = QWidget()
         lay = QVBoxLayout(w)
-        lay.setContentsMargins(28, 24, 28, 28)
+        lay.setContentsMargins(8, 16, 8, 8)
         lay.setSpacing(6)
-        lay.addWidget(hint("Pour les articles gratuits que le script n'a pas pu télécharger : "
-                           "ouvrez leurs liens, enregistrez les PDF dans un dossier, puis importez-les. "
-                           "Ils sont reconnus par leur DOI, leur titre ou un PMID dans le nom du fichier, "
-                           "renommés et ajoutés à l'Excel."))
-        lay.addSpacing(16)
+        big = QLabel("Importer les PDF d'une recherche PubMed Search")
+        big.setObjectName("pageTitle")
+        big.setWordWrap(True)
+        lay.addWidget(big)
+        lay.addWidget(self._when_box(
+            "À utiliser quand…",
+            "la recherche a été faite avec PubMed Search et que vous avez téléchargé vous-même les "
+            "articles gratuits qu'elle n'a pas pu obtenir (liens « À ouvrir manuellement » d'error.txt). "
+            "Les PDF sont reconnus parmi les articles de CETTE recherche, renommés, rangés dans son "
+            "dossier PDF_ et ajoutés à son Excel."))
+        lay.addWidget(hint("Pour des PDF qui ne viennent pas d'une recherche PubMed Search : sous-onglet "
+                           "« Renommer des PDF »."))
+        lay.addSpacing(10)
 
         self.imp_results = QLineEdit()
-        self.imp_results.setPlaceholderText("Dossier créé par une recherche (contient le fichier Excel)")
+        self.imp_results.setPlaceholderText("Dossier créé par une recherche (contient le fichier Excel et error.txt)")
         self.imp_results.textChanged.connect(self._on_import_results_changed)
         b = QPushButton("Choisir…")
         b.setObjectName("secondary")
-        b.clicked.connect(lambda: self._pick_dir(self.imp_results, "Dossier de résultats"))
+        b.clicked.connect(lambda: self._pick_dir(self.imp_results, "Dossier de résultats de la recherche"))
         row = QHBoxLayout()
         row.setSpacing(6)
         row.addWidget(self.imp_results, 1)
         row.addWidget(b)
-        lay.addWidget(section_title("Étape 1 : ouvrir les liens"))
-        lay.addWidget(field_label("Dossier de résultats", self.imp_results))
+        lay.addWidget(section_title("1. Ouvrir les liens des articles manquants"))
+        lay.addWidget(field_label("Dossier de résultats de la recherche", self.imp_results))
         lay.addLayout(row)
         self.err_imp_results = error_label()
         lay.addWidget(self.err_imp_results)
@@ -2587,9 +2796,9 @@ class MainWindow(QMainWindow):
         lrow.addWidget(self.open_links_btn)
         lrow.addStretch(1)
         lay.addLayout(lrow)
-        lay.addSpacing(22)
+        lay.addSpacing(18)
 
-        lay.addWidget(section_title("Étape 2 : importer les PDF enregistrés"))
+        lay.addWidget(section_title("2. Importer les PDF enregistrés dans cette recherche"))
         self.imp_pdfs = QLineEdit()
         dl = QStandardPaths.writableLocation(QStandardPaths.DownloadLocation) or os.path.expanduser("~")
         self.imp_pdfs.setPlaceholderText(os.path.join(dl, "pdf_import"))
@@ -2600,58 +2809,377 @@ class MainWindow(QMainWindow):
         row2.setSpacing(6)
         row2.addWidget(self.imp_pdfs, 1)
         row2.addWidget(b2)
-        lay.addWidget(field_label("Dossier des PDF enregistrés", self.imp_pdfs))
+        lay.addWidget(field_label("Dossier où vous avez enregistré les PDF", self.imp_pdfs))
         lay.addLayout(row2)
         self.err_imp_pdfs = error_label()
         lay.addWidget(self.err_imp_pdfs)
-        lay.addWidget(hint("Utilisez un dossier réservé à ces PDF : tous les PDF qu'il contient sont examinés."))
+        lay.addWidget(hint("Utilisez un dossier réservé à ces PDF : tous les PDF qu'il contient sont examinés. "
+                           "Les PDF qui ne correspondent à aucun article de la recherche sont laissés de côté."))
         lay.addSpacing(8)
         self.imp_move = QCheckBox("Déplacer les PDF au lieu de les copier")
         lay.addWidget(self.imp_move)
-        lay.addSpacing(22)
-        self.imp_btn = QPushButton("Importer les PDF")
+        lay.addSpacing(18)
+        self.imp_btn = QPushButton("Importer dans la recherche")
         self.imp_btn.setObjectName("primary")
         self.imp_btn.setMinimumHeight(44)
         self.imp_btn.clicked.connect(self._start_import)
         lay.addWidget(self.imp_btn)
-        lay.addSpacing(34)
+        lay.addStretch(1)
+        return w
 
-        # --- Identifier un dossier de PDF sans recherche préalable
-        lay.addWidget(section_title("Identifier un dossier de PDF (sans recherche)"))
-        lay.addWidget(hint("Pour n'importe quel dossier de PDF : chaque article est retrouvé dans PubMed "
-                           "(par son DOI, son PMID ou son titre ; sinon dans Crossref). Les PDF identifiés "
-                           "sont copiés et renommés PMID-Auteur(Année).pdf dans un nouveau dossier, avec un "
-                           "Excel des références et une bibliographie Word (style Vancouver). "
-                           "Les fichiers d'origine ne sont pas modifiés."))
-        lay.addSpacing(8)
+    def _build_rename_page(self):
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(8, 16, 8, 8)
+        lay.setSpacing(6)
+        big = QLabel("Renommer des PDF au format PubMed Search")
+        big.setObjectName("pageTitle")
+        big.setWordWrap(True)
+        lay.addWidget(big)
+        lay.addWidget(self._when_box(
+            "À utiliser quand…",
+            "vous avez des PDF venus d'ailleurs (collègues, téléchargements au fil du temps…), sans "
+            "recherche PubMed Search. Chaque PDF est retrouvé dans PubMed (DOI, PMID ou titre ; sinon "
+            "Crossref), copié et renommé PMID-Auteur(Année).pdf dans un NOUVEAU dossier, avec un Excel "
+            "des références et une bibliographie Word (Vancouver). Aucune recherche existante n'est "
+            "modifiée et les fichiers d'origine restent intacts."))
+        lay.addWidget(hint("Pour compléter une recherche PubMed Search avec des PDF téléchargés à la main : "
+                           "sous-onglet « Importer dans une recherche »."))
+        lay.addSpacing(10)
         self.idf_dir = QLineEdit()
-        self.idf_dir.setPlaceholderText("Dossier contenant les PDF")
+        self.idf_dir.setPlaceholderText("Dossier contenant les PDF à renommer")
         b3 = QPushButton("Choisir…")
         b3.setObjectName("secondary")
-        b3.clicked.connect(lambda: self._pick_dir(self.idf_dir, "Dossier de PDF à identifier"))
+        b3.clicked.connect(lambda: self._pick_dir(self.idf_dir, "Dossier de PDF à renommer"))
         row3 = QHBoxLayout()
         row3.setSpacing(6)
         row3.addWidget(self.idf_dir, 1)
         row3.addWidget(b3)
+        lay.addWidget(section_title("1. Dossier des PDF"))
         lay.addWidget(field_label("Dossier des PDF", self.idf_dir))
         lay.addLayout(row3)
         self.err_idf_dir = error_label()
         lay.addWidget(self.err_idf_dir)
+        lay.addSpacing(14)
+        lay.addWidget(section_title("2. Nom des résultats"))
         self.idf_name = QLineEdit()
         self.idf_name.setPlaceholderText("Bibliographie")
-        lay.addWidget(field_label("Nom des résultats (Excel, Word, dossier)", self.idf_name))
+        lay.addWidget(field_label("Nom (Excel, Word et dossier créé)", self.idf_name))
         lay.addWidget(self.idf_name)
         lay.addWidget(hint("Résultats dans le dossier des PDF : Nom_JJ.MM.AAAA_HHhMM/ avec PDF_Nom/, "
                            "Nom.xlsx et Nom.docx. Les PDF incertains vont dans PDF_Nom/A_verifier sans "
                            "être renommés."))
-        lay.addSpacing(14)
-        self.idf_btn = QPushButton("Identifier et renommer les PDF")
+        lay.addSpacing(18)
+        self.idf_btn = QPushButton("Renommer les PDF et créer la bibliographie")
         self.idf_btn.setObjectName("primary")
         self.idf_btn.setMinimumHeight(44)
         self.idf_btn.clicked.connect(self._start_identify)
         lay.addWidget(self.idf_btn)
         lay.addStretch(1)
         return w
+
+    # ------------------------------------------------------------- partage
+    def _build_share_tab(self):
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(28, 24, 28, 28)
+        lay.setSpacing(6)
+        lay.addWidget(hint("Envoyez le dossier d'une recherche à un collègue : l'application crée l'archive zip "
+                           "et ouvre votre messagerie avec la pièce jointe. Les messageries refusent en général "
+                           "les pièces jointes de plus de 20 à 25 Mo (et l'envoi grossit les fichiers d'environ "
+                           "un tiers) : au-delà de la limite choisie, l'envoi est découpé en plusieurs archives "
+                           "autonomes, ou remplacé par un lien de téléchargement."))
+        lay.addSpacing(12)
+        lay.addWidget(section_title("1. Recherche à partager"))
+        self.sh_dir = QLineEdit()
+        self.sh_dir.setPlaceholderText("Dossier de résultats d'une recherche (ou d'un renommage)")
+        self.sh_dir.textChanged.connect(lambda *_: QTimer.singleShot(250, self._share_scan))
+        b = QPushButton("Choisir…")
+        b.setObjectName("secondary")
+        b.clicked.connect(lambda: self._pick_dir(self.sh_dir, "Dossier à partager"))
+        self.sh_recent = QComboBox()
+        self.sh_recent.setToolTip("Résultats des dernières recherches")
+        self.sh_recent.activated.connect(self._share_pick_recent)
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        row.addWidget(self.sh_dir, 1)
+        row.addWidget(b)
+        lay.addWidget(field_label("Dossier", self.sh_dir))
+        lay.addLayout(row)
+        lay.addWidget(self.sh_recent)
+        self.sh_info = hint("")
+        lay.addWidget(self.sh_info)
+        lay.addSpacing(12)
+
+        lay.addWidget(section_title("2. Contenu de l'archive"))
+        self.sh_boxes = {}
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(18)
+        for i, (k, label) in enumerate(SHARE_KINDS):
+            cb = QCheckBox(label)
+            cb.setChecked(k != "other")
+            cb.toggled.connect(self._share_update)
+            self.sh_boxes[k] = cb
+            grid.addWidget(cb, i, 0)
+        lay.addLayout(grid)
+        self.sh_size = QLabel("")
+        self.sh_size.setObjectName("fieldLabel")
+        lay.addWidget(self.sh_size)
+        lay.addSpacing(12)
+
+        lay.addWidget(section_title("3. Envoi"))
+        self.sh_to = QLineEdit()
+        self.sh_to.setPlaceholderText("collegue@exemple.org")
+        lay.addWidget(field_label("Destinataire (facultatif)", self.sh_to))
+        lay.addWidget(self.sh_to)
+        self.sh_subject = QLineEdit()
+        lay.addWidget(field_label("Objet", self.sh_subject))
+        lay.addWidget(self.sh_subject)
+        self.sh_body = QPlainTextEdit()
+        self.sh_body.setMaximumHeight(130)
+        lay.addWidget(field_label("Message", self.sh_body))
+        lay.addWidget(self.sh_body)
+        crow = QHBoxLayout()
+        crow.setSpacing(12)
+        self.sh_client = QComboBox()
+        self.mail_clients = find_mail_clients()
+        for key, label in (("thunderbird", "Thunderbird"), ("outlook", "Outlook"),
+                           ("none", "Aucune (préparer l'archive)")):
+            if key == "none" or key in self.mail_clients:
+                self.sh_client.addItem(label, key)
+        clab = QLabel("Messagerie")
+        clab.setObjectName("fieldLabel")
+        crow.addWidget(clab)
+        crow.addWidget(self.sh_client, 1)
+        lay.addLayout(crow)
+        crow = QHBoxLayout()
+        crow.setSpacing(12)
+        llab = QLabel("Limite par mail")
+        llab.setObjectName("fieldLabel")
+        self.sh_limit = QSpinBox()
+        self.sh_limit.setRange(2, 500)
+        self.sh_limit.setValue(15)
+        self.sh_limit.setSuffix(" Mo")
+        self.sh_limit.setToolTip("Taille des fichiers joints par message. 15 Mo laisse la marge de "
+                                 "l'encodage (≈ +33 %) sous la limite de 20-25 Mo des messageries courantes.")
+        self.sh_limit.valueChanged.connect(self._share_update)
+        crow.addWidget(llab)
+        crow.addWidget(self.sh_limit)
+        crow.addStretch(1)
+        lay.addLayout(crow)
+        if "thunderbird" not in self.mail_clients and "outlook" not in self.mail_clients:
+            lay.addWidget(hint("Ni Thunderbird ni Outlook n'ont été trouvés sur cet ordinateur : l'archive sera "
+                               "préparée et son dossier ouvert ; joignez-la avec votre messagerie habituelle."))
+        self.sh_mode_split = QRadioButton("Plusieurs archives autonomes (un mail chacune)")
+        self.sh_mode_link = QRadioButton("Une archive + lien SwissTransfer (gratuit)")
+        self.sh_mode_split.setChecked(True)
+        for rb in (self.sh_mode_split, self.sh_mode_link):
+            rb.toggled.connect(self._share_update)
+        self.sh_mode_box = QWidget()
+        ml = QVBoxLayout(self.sh_mode_box)
+        ml.setContentsMargins(0, 4, 0, 0)
+        ml.setSpacing(2)
+        self.sh_mode_lbl = QLabel("")
+        self.sh_mode_lbl.setObjectName("fieldError")
+        self.sh_mode_lbl.setWordWrap(True)
+        ml.addWidget(self.sh_mode_lbl)
+        ml.addWidget(self.sh_mode_split)
+        ml.addWidget(self.sh_mode_link)
+        lay.addWidget(self.sh_mode_box)
+        self.sh_plan = hint("")
+        lay.addWidget(self.sh_plan)
+        lay.addSpacing(14)
+        self.sh_btn = QPushButton("Préparer l'archive et ouvrir la messagerie")
+        self.sh_btn.setObjectName("primary")
+        self.sh_btn.setMinimumHeight(44)
+        self.sh_btn.clicked.connect(self._share_start)
+        lay.addWidget(self.sh_btn)
+        self.sh_status = hint("")
+        lay.addWidget(self.sh_status)
+        lay.addStretch(1)
+        self._share_files = {}
+        self.tabs.currentChanged.connect(lambda i: i == self.TAB_SHARE and self._share_refresh_recent())
+        return w
+
+    def _share_refresh_recent(self):
+        seen, items = set(), []
+        for d in [self.results_dir] + [j.get("results", "") for j in reversed(self.queue)]:
+            if d and d not in seen and os.path.isdir(d):
+                seen.add(d)
+                items.append(d)
+        self.sh_recent.blockSignals(True)
+        self.sh_recent.clear()
+        self.sh_recent.addItem("Résultats récents…" if items else "Aucun résultat récent", "")
+        for d in items[:15]:
+            self.sh_recent.addItem(os.path.basename(d), d)
+        self.sh_recent.blockSignals(False)
+        self.sh_recent.setVisible(bool(items))
+        if not self.sh_dir.text().strip() and items:
+            self.sh_dir.setText(items[0])
+
+    def _share_pick_recent(self, i):
+        d = self.sh_recent.itemData(i)
+        if d:
+            self.sh_dir.setText(d)
+
+    def _share_scan(self):
+        d = self.sh_dir.text().strip()
+        self._share_files = scan_results(d) if os.path.isdir(d) else {}
+        for k, cb in self.sh_boxes.items():
+            items = self._share_files.get(k, [])
+            label = dict(SHARE_KINDS)[k]
+            cb.setText(f"{label} ({len(items)}, {fmt_size(sum(x[1] for x in items))})" if items else label)
+            cb.setEnabled(bool(items))
+        stem = os.path.basename(os.path.normpath(d)) if d else ""
+        query, n_art, n_pdf = "", 0, len(self._share_files.get("pdf", []))
+        xl = [x for x, _ in self._share_files.get("excel", []) if os.sep not in x and "/" not in x]
+        if xl:
+            try:
+                from openpyxl import load_workbook
+                wb = load_workbook(os.path.join(d, xl[0]), read_only=True)
+                if "Résumé" in wb.sheetnames:
+                    for row in wb["Résumé"].iter_rows(values_only=True):
+                        if row and row[0] in ("Requête PubMed", "Requête", "Requête utilisée") and row[1]:
+                            query = str(row[1])
+                            break
+                if "Articles" in wb.sheetnames:
+                    n_art = max(0, wb["Articles"].max_row - 1)
+                wb.close()
+            except Exception:  # noqa
+                pass
+        self.sh_info.setText(("Requête : " + query + "\n" if query else "")
+                             + (f"{n_art} articles, {n_pdf} PDF." if n_art else
+                                (f"{n_pdf} PDF." if self._share_files else
+                                 ("Dossier introuvable." if d else ""))))
+        if stem:
+            self.sh_subject.setText(f"Résultats PubMed Search : {stem}")
+            today = QDateTime.currentDateTime().toString("dd/MM/yyyy")
+            self.sh_body.setPlainText(
+                "Bonjour,\n\nVoici les résultats de ma recherche"
+                + (f" PubMed « {query} »" if query else f" « {stem} »")
+                + (f" ({n_art} articles, {n_pdf} PDF)" if n_art else "")
+                + f", réalisée avec PubMed Search (le {today}).\n\nBien cordialement,\n")
+        self._share_update()
+
+    def _share_selection(self):
+        files = []
+        for k, cb in self.sh_boxes.items():
+            if cb.isChecked() and cb.isEnabled():
+                files += [(rel, size, k) for rel, size in self._share_files.get(k, [])]
+        return files
+
+    def _share_update(self, *_):
+        files = self._share_selection()
+        total = sum(f[1] for f in files)
+        limit = self.sh_limit.value() * 1024 * 1024
+        self.sh_size.setText(f"Taille de l'archive : environ {fmt_size(total)} ({len(files)} fichiers)"
+                             if files else "Rien à partager : choisissez un dossier et des éléments.")
+        over = total > limit
+        self.sh_mode_box.setVisible(bool(files) and over)
+        self.sh_mode_lbl.setText(f"{fmt_size(total)} dépasse la limite de {self.sh_limit.value()} Mo par mail :")
+        plan = ""
+        if files and over and self.sh_mode_split.isChecked():
+            parts = plan_parts(files, limit)
+            big = [f for f in files if f[1] > limit]
+            plan = (f"{len(parts)} archives (une par mail). Chacune s'ouvre seule ; le collègue les "
+                    "décompresse dans un même dossier.")
+            if big:
+                plan += f" Attention : {len(big)} fichier(s) dépassent à eux seuls la limite."
+        elif files and over:
+            plan = ("L'archive sera créée et SwissTransfer s'ouvrira dans le navigateur : déposez-y l'archive, "
+                    "puis collez le lien obtenu dans le message.")
+        self.sh_plan.setText(plan)
+        self.sh_btn.setEnabled(bool(files))
+
+    def _share_start(self):
+        d = self.sh_dir.text().strip()
+        files = self._share_selection()
+        if not files:
+            return
+        limit = self.sh_limit.value() * 1024 * 1024
+        total = sum(f[1] for f in files)
+        split = total > limit and self.sh_mode_split.isChecked()
+        link = total > limit and self.sh_mode_link.isChecked()
+        stem = re.sub(r"[^\w.\-]+", "_", os.path.basename(os.path.normpath(d))) or "PubMedSearch"
+        out_dir = os.path.join(os.path.dirname(os.path.normpath(d)), f"Partage_{stem}")
+        k = 2
+        while os.path.exists(out_dir):
+            out_dir = os.path.join(os.path.dirname(os.path.normpath(d)), f"Partage_{stem}_{k}")
+            k += 1
+        try:
+            os.makedirs(out_dir, exist_ok=True)
+            free = shutil.disk_usage(out_dir).free
+        except OSError as e:
+            QMessageBox.warning(self, "Partager", f"Impossible de créer le dossier de partage :\n{e}")
+            return
+        if free < total * 1.1 + 50 * 1024 * 1024:
+            QMessageBox.warning(self, "Partager", f"Espace disque insuffisant : {fmt_size(total)} nécessaires, "
+                                                  f"{fmt_size(free)} disponibles.")
+            return
+        self._share_state = {"done": 0, "total": total or 1}
+        self._share_ctx = {"dir": d, "out": out_dir, "split": split, "link": link, "stem": stem}
+        threading.Thread(target=build_zips, daemon=True,
+                         args=(d, files, out_dir, stem, limit if split else None, self._share_state)).start()
+        self.sh_btn.setEnabled(False)
+        self._share_timer = QTimer(self)
+        self._share_timer.timeout.connect(self._share_poll)
+        self._share_timer.start(200)
+
+    def _share_poll(self):
+        st = self._share_state
+        pct = int(100 * st.get("done", 0) / max(1, st.get("total", 1)))
+        self.sh_status.setText(f"Création de l'archive… {pct} %")
+        if not st.get("finished"):
+            return
+        self._share_timer.stop()
+        self.sh_btn.setEnabled(True)
+        ctx = self._share_ctx
+        if st.get("error"):
+            self.sh_status.setText("Échec de la création de l'archive : " + st["error"])
+            return
+        zips = st.get("zips", [])
+        n = len(zips)
+        client = self.sh_client.currentData()
+        body = self.sh_body.toPlainText()
+        if n > 1:
+            parts_txt = (f"\nL'envoi est découpé en {n} messages (archives « partie 1 sur {n} »…). "
+                         "Enregistrez toutes les archives dans un même dossier puis décompressez-les : "
+                         "chacune s'ouvre seule et elles recomposent le dossier complet.\n")
+        elif ctx["link"]:
+            parts_txt = "\nLien de téléchargement (valable 30 jours) : [COLLER LE LIEN ICI]\n"
+        else:
+            parts_txt = ""
+        if parts_txt:
+            i = body.find("\nBien cordialement")
+            body = body[:i] + parts_txt + body[i:] if i >= 0 else body + parts_txt
+        sizes = ", ".join(f"{os.path.basename(z)} ({fmt_size(os.path.getsize(z))})" for z in zips)
+        launched = False
+        if client in ("thunderbird", "outlook"):
+            cmd = self.mail_clients[client]
+            if ctx["link"]:
+                msgs = [(self.sh_subject.text(), [])]
+            else:
+                msgs = [(self.sh_subject.text() + (f" ({i}/{n})" if n > 1 else ""), [z]) for i, z in enumerate(zips, 1)]
+            for i, (subj, att) in enumerate(msgs, 1):
+                bf = os.path.join(ctx["out"], f"message_mail_{i}.txt")
+                with open(bf, "w", encoding="utf-8") as f:
+                    f.write(body)
+                launched = compose_mail(client, cmd, self.sh_to.text().strip(), subj, bf, body, att) or launched
+        if ctx["link"]:
+            QDesktopServices.openUrl(QUrl("https://www.swisstransfer.com/fr"))
+            QApplication.clipboard().setText(body)
+        self._open_path(ctx["out"])
+        if launched:
+            msg = (f"Archive prête : {sizes}. " +
+                   ("Déposez-la sur SwissTransfer (onglet ouvert dans le navigateur), puis collez le lien "
+                    "dans le message qui s'est ouvert." if ctx["link"] else
+                    f"{n} message(s) ouvert(s) dans {self.sh_client.currentText()} : vérifiez puis envoyez."))
+        else:
+            msg = (f"Archive prête : {sizes}, dans le dossier qui vient de s'ouvrir. " +
+                   ("Déposez-la sur SwissTransfer (onglet ouvert) et envoyez le lien ; le message a été copié "
+                    "dans le presse-papiers." if ctx["link"] else
+                    "Joignez-la à un mail avec votre messagerie (un mail par archive)."))
+        self.sh_status.setText(msg)
 
     def _pick_dir(self, edit, title):
         d = QFileDialog.getExistingDirectory(self, title, edit.text().strip() or os.path.expanduser("~"))
@@ -3166,6 +3694,16 @@ class MainWindow(QMainWindow):
         self._save_settings()
         self._launch(script, args, "search")
 
+    @staticmethod
+    def _is_results_folder(d):
+        """Dossier créé par une recherche PubMed Search (Excel + error.txt ou dossier PDF_)."""
+        try:
+            names = os.listdir(d)
+        except OSError:
+            return False
+        return any(n.lower().endswith(".xlsx") for n in names) and (
+            "error.txt" in names or any(n.startswith("PDF_") for n in names))
+
     def _start_import(self):
         script = self._validate_common()
         if not script:
@@ -3173,6 +3711,18 @@ class MainWindow(QMainWindow):
         res = self.imp_results.text().strip()
         pdfs = self.imp_pdfs.text().strip()
         ok = True
+        if pdfs and res and os.path.abspath(pdfs) == os.path.abspath(res):
+            self._set_error(self.err_imp_pdfs, "Choisissez le dossier où VOUS avez enregistré les PDF, "
+                                               "pas le dossier de la recherche.", self.imp_pdfs)
+            return
+        if pdfs and os.path.isdir(pdfs) and self._is_results_folder(pdfs):
+            r = QMessageBox.question(
+                self, "Dossier inattendu",
+                "Le dossier des PDF ressemble lui-même au résultat d'une recherche PubMed Search.\n\n"
+                "S'il s'agit de PDF venus d'ailleurs à renommer, utilisez plutôt le sous-onglet "
+                "« Renommer des PDF ».\n\nImporter quand même ?")
+            if r != QMessageBox.Yes:
+                return
         if not os.path.isdir(res) or not any(f.lower().endswith(".xlsx") for f in os.listdir(res)):
             self._set_error(self.err_imp_results, "Choisissez un dossier créé par une recherche "
                                                   "(il doit contenir le fichier Excel).", self.imp_results)
@@ -3195,6 +3745,24 @@ class MainWindow(QMainWindow):
         if not script:
             return
         d = self.idf_dir.text().strip()
+        if os.path.isdir(d) and self._is_results_folder(d):
+            box = QMessageBox(self)
+            box.setWindowTitle("Ce dossier vient d'une recherche PubMed Search")
+            box.setIcon(QMessageBox.Question)
+            box.setText("Ce dossier contient les résultats d'une recherche PubMed Search (Excel, error.txt).")
+            box.setInformativeText("Pour ajouter des PDF téléchargés à la main à CETTE recherche, utilisez "
+                                   "« Importer dans une recherche ». Le renommage crée un "
+                                   "nouveau dossier indépendant, sans modifier la recherche.")
+            go_imp = box.addButton("Aller à Importer", QMessageBox.AcceptRole)
+            box.addButton("Renommer quand même", QMessageBox.DestructiveRole)
+            cancel = box.addButton("Annuler", QMessageBox.RejectRole)
+            box.exec()
+            if box.clickedButton() is go_imp:
+                self.imp_results.setText(d)
+                self.pdf_tabs.setCurrentIndex(0)
+                return
+            if box.clickedButton() is cancel:
+                return
         if not os.path.isdir(d) or not any(f.lower().endswith(".pdf") for f in os.listdir(d)):
             self._set_error(self.err_idf_dir, "Choisissez un dossier qui contient des fichiers PDF.",
                             self.idf_dir)
@@ -3537,6 +4105,10 @@ def stylesheet(ui, mono):
 * {{ font-family: "{ui}"; font-size: 14px; color: {C['ink']}; }}
 QMainWindow, #formPage, QScrollArea, QScrollArea > QWidget > QWidget {{ background: {C['slide']}; }}
 QTabWidget::pane {{ border: none; background: {C['slide']}; }}
+QTabWidget#subTabs QTabBar::tab {{ margin: 0 18px 0 0; font-size: 13px; }}
+#whenBox {{ background: {C['panel']}; border-left: 4px solid {C['hema']}; border-radius: 6px; }}
+#whenTitle {{ font-weight: 700; color: {C['hema']}; }}
+#pageTitle {{ font-size: 17px; font-weight: 700; padding: 2px 0 6px 0; }}
 QTabBar {{ background: {C['slide']}; }}
 QTabBar::tab {{ background: transparent; color: {C['muted']}; padding: 12px 4px 10px 4px;
                margin: 0 10px 0 28px; border: none; border-bottom: 3px solid transparent; font-size: 14px; }}

@@ -1,5 +1,5 @@
 ; Installateur Windows 10 / 11 de PubMed Search (NSIS 3)
-; Compilation (Linux ou Windows) : makensis -DVERSION=1.6.1 -DSRCDIR=<dossier PubMedSearch> installer.nsi
+; Compilation (Linux ou Windows) : makensis -DVERSION=1.7.0 -DSRCDIR=<dossier PubMedSearch> installer.nsi
 Unicode true
 Target amd64-unicode
 !include "MUI2.nsh"
@@ -7,7 +7,7 @@ Target amd64-unicode
 !include "x64.nsh"
 
 !ifndef VERSION
-  !define VERSION "1.6.1"
+  !define VERSION "1.7.0"
 !endif
 !ifndef SRCDIR
   !define SRCDIR "..\..\dist\PubMedSearch"
