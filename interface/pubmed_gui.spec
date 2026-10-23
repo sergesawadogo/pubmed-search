@@ -46,6 +46,8 @@ if sys.platform.startswith("linux"):
     SYS = ("/usr/lib/", "/lib/", "/lib64/", "/usr/lib64/")
     a.binaries = [b for b in a.binaries if not str(b[1]).startswith(SYS)]
 a.datas = [d for d in a.datas if keep(d)]
+# sources du logo : utiles pour régénérer les icônes, inutiles à l'exécution
+a.datas = [d for d in a.datas if not d[0].replace("\\", "/").endswith(("logo_source.png", "icon_1024.png"))]
 if not WIN:
     a.datas = [d for d in a.datas if not d[0].replace("\\", "/").endswith(("icon.ico", "IBMPlexMono-500.ttf"))]
 if not MAC:

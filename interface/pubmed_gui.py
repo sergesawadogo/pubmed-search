@@ -20,7 +20,7 @@ import threading
 
 APP_NAME = "PubMed Search"
 APP_ID = "pubmed-search-gui"
-APP_VERSION = "1.7.0"
+APP_VERSION = "1.8.1"
 
 
 # --------------------------------------------------------------------------- #
@@ -116,26 +116,102 @@ BASE_DIR = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
 RES = os.path.join(BASE_DIR, "resources")
 
 # Palette « coloration H&E » : hématoxyline (violet-bleu) et éosine (rose)
-C = {
-    "slide": "#F5F4F8",      # fond : lame de verre
-    "panel": "#FFFFFF",
-    "ink": "#1C1D33",
-    "muted": "#62637A",
-    "rule": "#DCDBE6",
-    "hema": "#3A3D8F",       # hématoxyline : actions, sélection
-    "hema_soft": "#E6E6F3",
-    "eosin": "#C8467A",      # éosine : PDF obtenus
-    "eosin_soft": "#F7E3EB",
-    "log_bg": "#17182B",
-    "log_fg": "#D9D8EA",
-    "log_dim": "#8C8DA8",
-    "ok": "#2E7D5B",
-    "log_pdf": "#5FD38D",    # journal : PDF obtenu (vert)
-    "log_nopdf": "#E36BD8",  # journal : sans PDF (magenta)
-    "log_json": "#5CC8E8",   # journal : JSON obtenu (cyan)
-    "warn": "#B26A00",
-    "err": "#B3261E",
+# Couleurs tirées du logo (vert, jaune, rouge) : le vert porte les actions et le succès,
+# l'ambre les avertissements et « sans PDF », le rouge les erreurs uniquement.
+# Deux jeux (clair / sombre) suivent le réglage d'apparence du système.
+THEMES = {
+    "light": {
+        "slide": "#F4F6F3", "panel": "#FFFFFF", "ink": "#17211B", "muted": "#56635B",
+        "rule": "#D6DDD7", "hema": "#0A7A3C", "hema_soft": "#E2F1E7", "on_accent": "#FFFFFF",
+        "accent_hover": "#08672F", "accent_pressed": "#065426", "accent_disabled": "#9FC7AE",
+        "tag": "#1C67A8", "eosin": "#1C67A8", "eosin_soft": "#E4EEF7", "focus": "#1C67A8",
+        "ok": "#0A7A3C", "warn": "#8A5B00", "err": "#C2261F", "err_soft": "#FBE7E5",
+        "disabled": "#8A948D", "disabled_bg": "#EEF1EE", "readonly_bg": "#EEF1EE",
+        "alt_row": "#F9FBF9", "final_border": "#C6DCCD", "check_border": "#9AA59D",
+        "scroll": "#C3CCC5", "tooltip_bg": "#17211B", "tooltip_fg": "#FFFFFF",
+        "when_bg": "#FFFFFF",
+    },
+    "dark": {
+        "slide": "#101411", "panel": "#181D19", "ink": "#E7ECE8", "muted": "#A2ADA5",
+        "rule": "#2B332D", "hema": "#3DBE6E", "hema_soft": "#173622", "on_accent": "#06140B",
+        "accent_hover": "#52CC80", "accent_pressed": "#2FA65C", "accent_disabled": "#2B4A36",
+        "tag": "#6BB3EE", "eosin": "#6BB3EE", "eosin_soft": "#16283A", "focus": "#8CC8FF",
+        "ok": "#3DBE6E", "warn": "#F2C94C", "err": "#FF6F61", "err_soft": "#3A1A17",
+        "disabled": "#6E7A72", "disabled_bg": "#1E2420", "readonly_bg": "#1E2420",
+        "alt_row": "#1C221E", "final_border": "#2E4A38", "check_border": "#5E6A62",
+        "scroll": "#3A443D", "tooltip_bg": "#E7ECE8", "tooltip_fg": "#101411",
+        "when_bg": "#181D19",
+    },
 }
+# Zone Journal : toujours sombre (« terminal »), identique dans les deux apparences.
+LOG_TOKENS = {
+    "log_bg": "#0F1411", "log_fg": "#DDE5DF", "log_dim": "#8E9A92", "log_pdf": "#4CD07D",
+    "log_nopdf": "#F2B705", "log_json": "#6BB3EE", "log_warn": "#F2C94C", "log_err": "#FF8A80",
+    "log_border": "#25302A", "log_sel": "#1F5A36", "strip_bg": "#25302A",
+    "ondark_border": "#34413A", "ondark_hover": "#7FD9A1", "ondark_disabled": "#4A564F",
+    "danger_border": "#7A3A34", "danger_fg": "#FFB4AB", "danger_hover": "#4A1E1A",
+    "chip_bg": "#25302A", "chip_run_bg": "#0A7A3C", "chip_ok_bg": "#1C4A2E", "chip_ok_fg": "#BDEBCF",
+    "chip_warn_bg": "#5A4314", "chip_warn_fg": "#F3D9A4", "chip_err_bg": "#5C1F1B", "chip_err_fg": "#F6C0BB",
+    "log_scroll": "#34413A",
+}
+C = {}
+C.update(THEMES["light"])
+C.update(LOG_TOKENS)
+CURRENT_THEME = "light"
+
+
+def system_scheme():
+    """'dark' si le système est en apparence sombre, sinon 'light'."""
+    try:
+        from PySide6.QtGui import QGuiApplication as _G
+        sch = _G.styleHints().colorScheme()
+        return "dark" if sch == Qt.ColorScheme.Dark else "light"
+    except Exception:  # noqa
+        return "light"
+
+
+def set_theme(mode):
+    global CURRENT_THEME
+    CURRENT_THEME = mode if mode in THEMES else "light"
+    C.clear()
+    C.update(THEMES[CURRENT_THEME])
+    C.update(LOG_TOKENS)
+    write_theme_svgs()
+
+
+def theme_dir():
+    d = os.path.join(config_dir(), "theme")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def write_theme_svgs():
+    """Flèches des champs numériques et coche, aux couleurs du thème courant."""
+    files = {
+        "up.svg": f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 6"><path d="M1 5l4-4 4 4" '
+                  f'fill="none" stroke="{C["muted"]}" stroke-width="1.6" stroke-linecap="round" '
+                  'stroke-linejoin="round"/></svg>',
+        "down.svg": f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 6"><path d="M1 1l4 4 4-4" '
+                    f'fill="none" stroke="{C["muted"]}" stroke-width="1.6" stroke-linecap="round" '
+                    'stroke-linejoin="round"/></svg>',
+        "check.svg": f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path d="M3.5 8.5l3 3 6-7" '
+                     f'fill="none" stroke="{C["on_accent"]}" stroke-width="2" stroke-linecap="round" '
+                     'stroke-linejoin="round"/></svg>',
+    }
+    try:
+        d = theme_dir()
+        for name, txt in files.items():
+            with open(os.path.join(d, f"{CURRENT_THEME}_{name}"), "w", encoding="utf-8") as f:
+                f.write(txt)
+    except OSError:
+        pass
+
+
+def theme_svg(name):
+    p = os.path.join(theme_dir(), f"{CURRENT_THEME}_{name}")
+    return (p if os.path.exists(p) else os.path.join(RES, name)).replace(os.sep, "/")
+
+
 
 
 def config_dir():
@@ -307,18 +383,27 @@ EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9\-]+(\.[A-Za-z0-9\-]+)*\.[
 # --------------------------------------------------------------------------- #
 # Coloration syntaxique de la requête PubMed
 # --------------------------------------------------------------------------- #
+_HIGHLIGHTERS = []
+
+
 class QueryHighlighter(QSyntaxHighlighter):
     def __init__(self, doc):
         super().__init__(doc)
+        _HIGHLIGHTERS.append(self)
+        self.refresh_formats(rehighlight=False)
+
+    def refresh_formats(self, rehighlight=True):
         self.f_tag = QTextCharFormat()
-        self.f_tag.setForeground(QColor(C["eosin"]))
+        self.f_tag.setForeground(QColor(C["tag"]))
         self.f_op = QTextCharFormat()
         self.f_op.setForeground(QColor(C["hema"]))
         self.f_op.setFontWeight(QFont.Weight.DemiBold)
         self.f_quote = QTextCharFormat()
-        self.f_quote.setForeground(QColor(C["ok"]))
+        self.f_quote.setForeground(QColor(C["warn"]))
         self.f_paren = QTextCharFormat()
         self.f_paren.setForeground(QColor(C["muted"]))
+        if rehighlight:
+            self.rehighlight()
 
     def highlightBlock(self, text):
         for m in re.finditer(r"[()]", text):
@@ -360,7 +445,7 @@ class ProgressStrip(QWidget):
         path = QPainterPath()
         path.addRoundedRect(r, 5, 5)
         p.setClipPath(path)
-        p.fillRect(r, QColor("#2A2B45"))
+        p.fillRect(r, QColor(C["strip_bg"]))
         if self.total:
             w_ok = r.width() * self.ok / self.total
             w_miss = r.width() * self.miss / self.total
@@ -465,7 +550,7 @@ class EvalDialog(QDialog):
                 if c and r == 2:
                     lab.setStyleSheet(f"color:{C['ok']}; font-weight:700;")
                 if c and r == 4:
-                    lab.setStyleSheet(f"color:{C['eosin']}; font-weight:600;")
+                    lab.setStyleSheet("font-weight:600;")
                 grid.addWidget(lab, r, c, alignment=Qt.AlignRight if c else Qt.AlignLeft)
         lay.addLayout(grid)
         lay.addWidget(hint("Les articles gratuits dans PMC sont presque toujours téléchargés ; les autres "
@@ -1119,6 +1204,212 @@ def compose_mail(client, cmd, to, subject, body_file, body, attachments):
     return False
 
 
+# --------------------------------------------------------------------------- #
+# JSON de texte intégral -> PDF lisibles par Gemini Notebook (ex-NotebookLM)
+# Gemini Notebook n'accepte pas les .json ; il lit les PDF qui ont une couche de texte.
+# --------------------------------------------------------------------------- #
+def _h(t):
+    import html as _html
+    return _html.escape(t or "")
+
+
+def results_meta(results_dir):
+    """{PMID: {"authors": "...", "journal": ..., "year": ...}} lu dans l'Excel de la recherche."""
+    meta = {}
+    try:
+        from openpyxl import load_workbook
+        xs = [f for f in os.listdir(results_dir) if f.lower().endswith(".xlsx") and not f.startswith("~$")]
+        for x in xs:
+            wb = load_workbook(os.path.join(results_dir, x), read_only=True)
+            if "Articles" not in wb.sheetnames:
+                wb.close()
+                continue
+            rows = wb["Articles"].iter_rows(values_only=True)
+            head = [str(h or "") for h in next(rows)]
+            ix = {h: i for i, h in enumerate(head)}
+            for r in rows:
+                pm = str(r[ix["PMID"]] or "") if "PMID" in ix else ""
+                if not pm:
+                    continue
+                au = [r[ix[k]] for k in ("1er auteur", "Autres auteurs", "Dernier auteur") if k in ix]
+                names = []
+                for a in au:
+                    names += [n.strip() for n in str(a or "").split(";") if n.strip()]
+                meta[pm] = {"authors": ", ".join(names),
+                            "journal": r[ix["Journal"]] if "Journal" in ix else "",
+                            "year": r[ix["Année"]] if "Année" in ix else ""}
+            wb.close()
+            break
+    except Exception:  # noqa
+        pass
+    return meta
+
+
+def json_doc_html(doc, meta=None):
+    meta = meta or {}
+    ids = " · ".join(x for x in (
+        str(doc.get("journal") or meta.get("journal") or ""), str(doc.get("annee") or meta.get("year") or ""),
+        f"DOI {doc['doi']}" if doc.get("doi") else "", f"PMID {doc['pmid']}" if doc.get("pmid") else "",
+        doc.get("pmcid") or "") if x)
+    out = [f"<h1>{_h(doc.get('titre') or '(sans titre)')}</h1>"]
+    if meta.get("authors"):
+        out.append(f"<p class='authors'>{_h(meta['authors'])}</p>")
+    if ids:
+        out.append(f"<p class='meta'>{_h(ids)}</p>")
+    src = (f"Document reconstitué par PubMed Search à partir du texte intégral structuré (JSON) "
+           f"fourni par {doc.get('source') or 'une source ouverte'} ({doc.get('niveau') or ''})"
+           + (f", licence : {doc['licence']}" if doc.get("licence") else "")
+           + (f", récupéré le {doc['recupere_le'][:10]}" if doc.get("recupere_le") else "")
+           + ". La mise en page de l'éditeur n'est pas reproduite.")
+    out.append(f"<p class='src'>{_h(src)}</p>")
+    if doc.get("resume"):
+        out.append("<h2>Résumé</h2>")
+        out += [f"<p>{_h(x)}</p>" for x in doc["resume"].split("\n") if x.strip()]
+    for sec in doc.get("sections") or []:
+        parts = [x.strip() for x in (sec.get("titre") or "").split(">") if x.strip()]
+        level = min(4, 1 + max(1, len(parts)))
+        title = parts[-1] if parts and parts[-1] not in ("(texte)", "(sans titre)") else ""
+        if title:
+            out.append(f"<h{level}>{_h(title)}</h{level}>")
+        out += [f"<p>{_h(x)}</p>" for x in (sec.get("texte") or "").split("\n") if x.strip()]
+    if doc.get("figures"):
+        out.append("<h2>Figures (légendes)</h2>")
+        out += [f"<p><b>{_h(f.get('label'))}</b> {_h(f.get('legende'))}</p>" for f in doc["figures"]]
+    if doc.get("tableaux"):
+        out.append("<h2>Tableaux (légendes)</h2>")
+        out += [f"<p><b>{_h(t.get('label'))}</b> {_h(t.get('legende'))}</p>" for t in doc["tableaux"]]
+    if doc.get("references"):
+        out.append("<h2>Références</h2><ol>")
+        out += [f"<li>{_h(r)}</li>" for r in doc["references"]]
+        out.append("</ol>")
+    return "\n".join(out)
+
+
+PDF_CSS = """
+body { line-height: 135%; }
+h1 { font-size: 17pt; margin-bottom: 4pt; }
+h2 { font-size: 13pt; margin-top: 14pt; }
+h3 { font-size: 11.5pt; margin-top: 10pt; }
+h4 { font-size: 10.5pt; margin-top: 8pt; font-style: italic; }
+p { margin-top: 0pt; margin-bottom: 5pt; }
+p.authors { font-size: 10pt; }
+p.meta { font-size: 9pt; color: #444444; }
+p.src { font-size: 8.5pt; color: #555555; border: 1px solid #cccccc; padding: 4pt; }
+li { font-size: 8.5pt; margin-bottom: 2pt; }
+"""
+
+
+def render_pdf(html, path, title, font_family):
+    """HTML -> PDF avec texte sélectionnable (QTextDocument + QPdfWriter, polices intégrées)."""
+    from PySide6.QtCore import QMarginsF
+    from PySide6.QtGui import QPageLayout, QPageSize, QPdfWriter, QTextDocument
+    writer = QPdfWriter(path)
+    writer.setPageSize(QPageSize(QPageSize.A4))
+    writer.setPageMargins(QMarginsF(18, 16, 18, 16), QPageLayout.Millimeter)
+    writer.setResolution(144)
+    writer.setTitle(title[:250])
+    writer.setCreator("PubMed Search")
+    doc = QTextDocument()
+    f = QFont(font_family)
+    f.setPointSizeF(10)
+    doc.setDefaultFont(f)
+    doc.setDefaultStyleSheet(PDF_CSS)
+    doc.setHtml(f"<html><body>{html}</body></html>")
+    doc.print_(writer)
+    del writer
+    return os.path.exists(path) and os.path.getsize(path) > 0
+
+
+def plan_notebook(results_dir, include_pdfs):
+    """Éléments à placer dans le dossier Gemini Notebook : [(type, chemin source, nom)]."""
+    items = []
+    for d in sorted(os.listdir(results_dir)):
+        full = os.path.join(results_dir, d)
+        if not os.path.isdir(full):
+            continue
+        if d.startswith("JSON_"):
+            items += [("json", os.path.join(full, f), f[:-5] + ".pdf")
+                      for f in sorted(os.listdir(full)) if f.lower().endswith(".json")]
+        elif d.startswith("PDF_") and include_pdfs:
+            items += [("pdf", os.path.join(full, f), f)
+                      for f in sorted(os.listdir(full)) if f.lower().endswith(".pdf")]
+    return items
+
+
+NB_SKIP = ("GeminiNotebook_", "Partage_", ".", "journaux")
+
+
+def _nb_files(folder, ext):
+    try:
+        return sorted(f for f in os.listdir(folder)
+                      if f.lower().endswith(ext) and not f.startswith((".", "~$")))
+    except OSError:
+        return []
+
+
+def _is_pubmed_json(path):
+    """Vrai si le fichier ressemble à un JSON de texte intégral PubMed Search."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            d = json.load(f)
+        return isinstance(d, dict) and ("sections" in d or "schema" in d) and "titre" in d
+    except Exception:  # noqa
+        return False
+
+
+def _nb_unit(results_dir, json_dirs, pdf_dirs, include_pdfs, label):
+    items = []
+    for jd in json_dirs:
+        items += [("json", os.path.join(jd, f), f[:-5] + ".pdf") for f in _nb_files(jd, ".json")]
+    if include_pdfs:
+        for pd in pdf_dirs:
+            items += [("pdf", os.path.join(pd, f), f) for f in _nb_files(pd, ".pdf")]
+    try:
+        done = any(d.startswith("GeminiNotebook_") and os.path.isdir(os.path.join(results_dir, d))
+                   for d in os.listdir(results_dir))
+    except OSError:
+        done = False
+    return {"dir": results_dir, "items": items, "label": label, "converted": done,
+            "json": sum(1 for k, _, _ in items if k == "json")}
+
+
+def find_notebook_units(path, include_pdfs, depth=3, top=True):
+    """Recherches à convertir pour Gemini Notebook à partir du dossier choisi.
+    Accepte : un dossier de résultats (avec JSON_…/PDF_…), un dossier JSON_… ou PDF_… choisi
+    directement, un dossier de JSON isolés, ou un dossier contenant plusieurs recherches
+    (exploré sur `depth` niveaux ; seules les recherches avec des JSON sont retenues)."""
+    path = os.path.normpath(path)
+    base = os.path.basename(path)
+    parent = os.path.dirname(path)
+    if top and base.startswith(("JSON_", "PDF_")):
+        stem = base.split("_", 1)[1]
+        jd = os.path.join(parent, "JSON_" + stem)
+        pd = os.path.join(parent, "PDF_" + stem)
+        u = _nb_unit(parent, [jd] if os.path.isdir(jd) else [], [pd] if os.path.isdir(pd) else [],
+                     include_pdfs, os.path.basename(parent))
+        return [u] if u["items"] else []
+    try:
+        subs = sorted(d for d in os.listdir(path) if os.path.isdir(os.path.join(path, d)))
+    except OSError:
+        return []
+    jds = [os.path.join(path, d) for d in subs if d.startswith("JSON_")]
+    pds = [os.path.join(path, d) for d in subs if d.startswith("PDF_")]
+    if jds or (top and pds):
+        u = _nb_unit(path, jds, pds, include_pdfs, base)
+        return [u] if (u["items"] if top else u["json"]) else []
+    js = _nb_files(path, ".json")
+    if js and _is_pubmed_json(os.path.join(path, js[0])):
+        u = _nb_unit(path, [path], [], include_pdfs, base)
+        return [u]
+    if depth <= 0:
+        return []
+    units = []
+    for d in subs:
+        if not d.startswith(NB_SKIP):
+            units += find_notebook_units(os.path.join(path, d), include_pdfs, depth - 1, top=False)
+    return units
+
+
 # sources optionnelles du script (--sources) : clé, libellé, info-bulle
 SOURCES = (
     ("elsevier", "Elsevier", "API Elsevier (ScienceDirect, Cell, JBC) : PDF puis JSON. Clé requise."),
@@ -1134,7 +1425,7 @@ SOURCES = (
 
 # fonds proposés pour la zone Journal : clé -> (libellé, couleur)
 LOG_THEMES = {
-    "nuit": ("Nuit violette (défaut)", "#111222"),
+    "nuit": ("Graphite (défaut)", "#0F1411"),
     "noir": ("Noir", "#000000"),
     "ardoise": ("Ardoise", "#1E2329"),
     "bleu": ("Bleu nuit", "#0B1E3A"),
@@ -1498,6 +1789,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle(APP_NAME)
         self.setWindowIcon(QIcon(os.path.join(RES, "icon.png")))
+        self._ui_font = QApplication.font().family()
         self.resize(1240, 800)
         self.setMinimumSize(980, 640)
         self.settings_path = os.path.join(config_dir(), "settings.json")
@@ -1548,11 +1840,90 @@ class MainWindow(QMainWindow):
 
         self._load_settings()
         self._start_inbox()
+        self._build_menu()
         self._refresh_script()
         self._update_preview()
         self._sync_sort_state()
 
     # ----------------------------------------------------------------- header
+    def _build_menu(self):
+        """Barre de menus : toutes les commandes et leurs raccourcis (macOS : menu de l'app)."""
+        from PySide6.QtGui import QAction, QKeySequence
+        mb = self.menuBar()
+        mb.setNativeMenuBar(True)
+
+        def act(menu, text, slot, key=None, role=None):
+            a = QAction(text, self)
+            if key is not None:
+                a.setShortcut(QKeySequence(key))
+            if role is not None:
+                a.setMenuRole(role)
+            a.triggered.connect(slot)
+            menu.addAction(a)
+            return a
+        m = mb.addMenu("Fichier")
+        act(m, "Nouvelle recherche", self._new_search, QKeySequence.New)
+        act(m, "Importer une liste de recherches (Excel)…", self._queue_import_excel, "Ctrl+I")
+        act(m, "Créer le modèle Excel de liste…", self._queue_make_template)
+        m.addSeparator()
+        self.m_open = act(m, "Ouvrir le dossier des résultats", lambda: self._open_path(self._shown_paths()[0]),
+                          "Ctrl+Shift+O")
+        m.addSeparator()
+        act(m, "Quitter", self.close, QKeySequence.Quit, QAction.QuitRole)
+        m = mb.addMenu("Recherche")
+        self.m_eval = act(m, "Évaluer", self._evaluate_form, "Ctrl+E")
+        self.m_add = act(m, "Ajouter à la file", self._add_to_queue, "Ctrl+Shift+Return")
+        self.m_run = act(m, "Lancer la recherche", self._start_search, "Ctrl+Return")
+        self.m_stop = act(m, "Arrêter", self._stop, "Ctrl+.")
+        m.addSeparator()
+        self.m_qrun = act(m, "Lancer la file d'attente", self._queue_start_clicked)
+        self.m_qeval = act(m, "Évaluer la file d'attente", self._queue_evaluate)
+        m.aboutToShow.connect(self._menu_states)
+        m = mb.addMenu("Affichage")
+        for i, name, key in ((self.TAB_SEARCH, "Recherche", "Ctrl+1"), (self.TAB_QUEUE, "File d'attente", "Ctrl+2"),
+                             (self.TAB_IMPORT, "PDF", "Ctrl+3"), (self.TAB_SHARE, "Partager", "Ctrl+4")):
+            act(m, name, lambda _=False, i=i: self.tabs.setCurrentIndex(i), key)
+        act(m, "Réglages", lambda: self.tabs.setCurrentIndex(self.TAB_SETTINGS), QKeySequence.Preferences,
+            QAction.PreferencesRole)
+        m = mb.addMenu("Aide")
+        act(m, "Notice d'utilisation", lambda: QDesktopServices.openUrl(
+            QUrl("https://github.com/sergesawadogo/pubmed-search#readme")))
+        act(m, "Journal de démarrage", lambda: self._open_path(startup_log_path()))
+        m.addSeparator()
+        act(m, f"À propos de {APP_NAME}", self._about, role=QAction.AboutRole)
+
+    def _menu_states(self):
+        running = self.proc is not None
+        self.m_run.setEnabled(not running and getattr(self, "editing_job", None) is None)
+        self.m_stop.setEnabled(running)
+        self.m_eval.setEnabled(self.eval_btn.isEnabled())
+        self.m_add.setText("Enregistrer dans la file" if getattr(self, "editing_job", None) is not None
+                           else "Ajouter à la file")
+        self.m_qrun.setEnabled(self.q_run.isEnabled())
+        self.m_qeval.setEnabled(self.q_eval.isEnabled())
+
+    def _new_search(self):
+        if getattr(self, "editing_job", None) is not None:
+            self._end_edit()
+        self.query.clear()
+        self._set_filter_labels([])
+        self.excel.clear()
+        self.tabs.setCurrentIndex(self.TAB_SEARCH)
+        self.query.setFocus()
+
+    def _about(self):
+        QMessageBox.about(self, f"À propos de {APP_NAME}",
+                          f"<b>{APP_NAME}</b> {APP_VERSION}<br>Recherche PubMed et téléchargement des PDF en "
+                          "libre accès.<br><br>Script : " + _h(self.script_path.text().strip() or "—") +
+                          "<br>Licence MIT — <a href='https://github.com/sergesawadogo/pubmed-search'>"
+                          "github.com/sergesawadogo/pubmed-search</a>")
+
+    def theme_changed(self):
+        """Apparence claire/sombre du système modifiée pendant l'exécution."""
+        self._apply_log_bg(getattr(self, "log_bg", LOG_THEMES["nuit"][1]))
+        self.strip.update()
+        self._queue_refresh()
+
     def _build_header(self):
         bar = QFrame()
         bar.setObjectName("header")
@@ -1582,6 +1953,22 @@ class MainWindow(QMainWindow):
         lay = QVBoxLayout(w)
         lay.setContentsMargins(28, 24, 28, 28)
         lay.setSpacing(6)
+
+        self.editing_job = None
+        self.edit_bar = QFrame()
+        self.edit_bar.setObjectName("editBar")
+        eb = QHBoxLayout(self.edit_bar)
+        eb.setContentsMargins(12, 8, 8, 8)
+        self.edit_lbl = QLabel("")
+        self.edit_lbl.setWordWrap(True)
+        eb.addWidget(self.edit_lbl, 1)
+        ecancel = QPushButton("Annuler la modification")
+        ecancel.setObjectName("secondary")
+        ecancel.clicked.connect(self._end_edit)
+        eb.addWidget(ecancel)
+        self.edit_bar.hide()
+        lay.addWidget(self.edit_bar)
+        lay.addSpacing(6)
 
         self.query = QPlainTextEdit()
         self.query.setObjectName("query")
@@ -1676,6 +2063,12 @@ class MainWindow(QMainWindow):
         prow.addWidget(self.getjson)
         prow.addStretch(1)
         lay.addLayout(prow)
+        self.json2pdf = QCheckBox("Préparer aussi pour Gemini Notebook (JSON convertis en PDF)")
+        self.json2pdf.setToolTip("À la fin de la recherche, crée le dossier GeminiNotebook_… : les JSON "
+                                 "convertis en PDF lisibles par Gemini Notebook, avec les PDF téléchargés.")
+        self.json2pdf.setEnabled(False)
+        self.getjson.toggled.connect(lambda on: self.json2pdf.setEnabled(on))
+        lay.addWidget(self.json2pdf)
         lay.addSpacing(8)
 
         # Sources optionnelles (menu déroulant à cases)
@@ -2110,7 +2503,7 @@ class MainWindow(QMainWindow):
         self.qtable.setShowGrid(False)
         self.qtable.setAlternatingRowColors(True)
         hh = self.qtable.horizontalHeader()
-        for c, wdt in ((0, 84), (1, 150), (3, 112), (4, 150), (5, 104)):
+        for c, wdt in ((0, 84), (1, 140), (3, 104), (4, 130), (5, 92)):
             hh.setSectionResizeMode(c, QHeaderView.Interactive)
             self.qtable.setColumnWidth(c, wdt)
         hh.setSectionResizeMode(2, QHeaderView.Stretch)
@@ -2133,7 +2526,9 @@ class MainWindow(QMainWindow):
         row.setVerticalSpacing(6)
         self.q_up = QPushButton("Monter")
         self.q_down = QPushButton("Descendre")
-        self.q_edit = QPushButton("Reprendre dans Recherche")
+        self.q_edit = QPushButton("Modifier dans Recherche")
+        self.q_edit.setToolTip("Ouvre la recherche dans l'onglet Recherche pour la modifier ; elle garde sa "
+                               "place dans la file. Impossible pendant qu'elle est en cours.")
         self.q_del = QPushButton("Retirer")
         self.q_clear = QPushButton("Retirer les terminées")
         for i, b in enumerate((self.q_up, self.q_down, self.q_del)):
@@ -2551,14 +2946,69 @@ class MainWindow(QMainWindow):
         self.q_up.setEnabled(movable and r > 0)
         self.q_down.setEnabled(movable and r < len(self.queue) - 1)
         self.q_del.setEnabled(movable)
-        self.q_edit.setEnabled(r >= 0)
+        self.q_edit.setEnabled(movable)
         self.q_clear.setEnabled(any(j["status"] in ("ok", "arret", "erreur") for j in self.queue))
         n_wait = sum(1 for j in self.queue if j["status"] == "attente")
         self.q_run.setEnabled(n_wait > 0 and not self.queue_active and self.proc is None)
 
+    def _end_edit(self):
+        self.editing_job = None
+        self.edit_bar.hide()
+        self.add_queue_btn.setText("Ajouter à la file")
+        self.add_queue_btn.setObjectName("secondary")
+        self.add_queue_btn.style().unpolish(self.add_queue_btn)
+        self.add_queue_btn.style().polish(self.add_queue_btn)
+        self.run_btn.show()
+
+    def _save_edit(self, new):
+        job = self.editing_job
+        if job not in self.queue:
+            QMessageBox.information(self, "Modification", "Cette recherche n'est plus dans la file : "
+                                    "elle est ajoutée comme nouvelle recherche.")
+            self._end_edit()
+            self.queue.append(new)
+        elif job["status"] == "cours":
+            r = QMessageBox.question(self, "Modification", f"« {job['stem']} » a démarré entre-temps : la "
+                                     "modification ne peut plus s'appliquer.\n\nL'ajouter à la file comme "
+                                     "nouvelle recherche ?")
+            if r != QMessageBox.Yes:
+                return
+            self._end_edit()
+            self.queue.append(new)
+        else:
+            if job["status"] in ("ok", "erreur", "arret"):
+                r = QMessageBox.question(self, "Modification", f"« {job['stem']} » est terminée. "
+                                         "L'enregistrer la remet en attente pour être relancée (les résultats "
+                                         "déjà obtenus restent dans leur dossier). Continuer ?")
+                if r != QMessageBox.Yes:
+                    return
+            same = all(job.get(k) == new.get(k) for k in ("query", "sort", "max"))
+            keep = {k: job[k] for k in ("id", "source") if job.get(k)}
+            if same and job.get("eval") and not new.get("eval"):
+                keep["eval"] = job["eval"]
+            if self._viewing is job:
+                self._view_job(None)
+            job.clear()
+            job.update(new)
+            job.update(keep)
+            self._end_edit()
+        self._queue_refresh()
+        self._save_settings()
+        self.tabs.setCurrentIndex(self.TAB_QUEUE)
+        if job in self.queue:
+            self.qtable.selectRow(self.queue.index(job))
+            self._view_job(job)
+        self.q_status.setText("Modifications enregistrées.")
+
     def _add_to_queue(self):
         job = self._collect_job()
         if not job:
+            return
+        if getattr(self, "editing_job", None) is not None:
+            le = getattr(self, "_last_eval", None)
+            if le and le[0] == job["query"] and le[1] == job["sort"] and le[2] == job["max"]:
+                job["eval"] = le[3]
+            self._save_edit(job)
             return
         le = getattr(self, "_last_eval", None)
         if le and le[0] == job["query"] and le[1] == job["sort"] and le[2] == job["max"]:
@@ -2583,6 +3033,8 @@ class MainWindow(QMainWindow):
     def _queue_remove(self):
         r = self._queue_sel()
         if r >= 0 and self.queue[r]["status"] != "cours":
+            if getattr(self, "editing_job", None) is self.queue[r]:
+                self._end_edit()
             if self._viewing is self.queue[r]:
                 self._view_job(None)
             self._delete_job_log(self.queue[r])
@@ -2601,11 +3053,22 @@ class MainWindow(QMainWindow):
         self._save_settings()
 
     def _queue_edit(self):
-        """Recharge une recherche de la file dans le formulaire Recherche."""
+        """Ouvre une recherche de la file dans le formulaire Recherche pour la modifier ; elle reste
+        dans la file (à sa place) et n'est pas lancée tant que la modification est ouverte."""
         r = self._queue_sel()
-        if r < 0:
+        if r < 0 or self.queue[r]["status"] == "cours":
             return
         job = self.queue[r]
+        self.editing_job = job
+        self.edit_lbl.setText(f"Modification de « {job['stem']} » (file d'attente, position {r + 1}). "
+                              "Elle garde sa place et ne sera pas lancée avant l'enregistrement.")
+        self.edit_bar.show()
+        self.add_queue_btn.setText("Enregistrer dans la file")
+        self.add_queue_btn.setObjectName("primary")
+        self.run_btn.hide()
+        for b in (self.add_queue_btn,):
+            b.style().unpolish(b)
+            b.style().polish(b)
         self.query.setPlainText(job.get("base_query", ""))
         self._set_filter_labels(job.get("filters", []))
         self.excel.setText(job["stem"])
@@ -2675,7 +3138,11 @@ class MainWindow(QMainWindow):
     def _queue_next(self):
         script = self.script_path.text().strip()
         email = self.email.text().strip()
-        nxt = next((j for j in self.queue if j["status"] == "attente"), None)
+        editing = getattr(self, "editing_job", None)
+        nxt = next((j for j in self.queue if j["status"] == "attente" and j is not editing), None)
+        if nxt is None and editing is not None and editing in self.queue and editing["status"] == "attente":
+            self.q_status.setText(f"« {editing['stem']} » est en cours de modification : elle n'a pas été "
+                                  "lancée. Enregistrez-la puis relancez la file.")
         if self.queue_stop or nxt is None or not os.path.exists(script):
             done = sum(1 for j in self.queue if j["status"] == "ok")
             self.queue_active = False
@@ -2733,6 +3200,7 @@ class MainWindow(QMainWindow):
         self.pdf_tabs.setObjectName("subTabs")
         self.pdf_tabs.addTab(self._build_import_page(), "Importer dans une recherche")
         self.pdf_tabs.addTab(self._build_rename_page(), "Renommer des PDF")
+        self.pdf_tabs.addTab(self._build_notebook_page(), "Pour Gemini Notebook")
         olay.addWidget(self.pdf_tabs, 1)
         return outer
 
@@ -2826,6 +3294,282 @@ class MainWindow(QMainWindow):
         lay.addWidget(self.imp_btn)
         lay.addStretch(1)
         return w
+
+    def _build_notebook_page(self):
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(8, 16, 8, 8)
+        lay.setSpacing(6)
+        big = QLabel("Préparer une recherche pour Gemini Notebook")
+        big.setObjectName("pageTitle")
+        big.setWordWrap(True)
+        lay.addWidget(big)
+        lay.addWidget(self._when_box(
+            "À utiliser quand…",
+            "vous voulez interroger les articles d'une recherche dans Gemini Notebook (ex-NotebookLM). "
+            "Gemini Notebook n'accepte pas les fichiers JSON : chaque JSON de texte intégral est converti "
+            "en PDF avec texte sélectionnable (titre, auteurs, résumé, sections, légendes, références). "
+            "Un dossier GeminiNotebook_… est créé dans les résultats ; il suffit d'y importer ses PDF. "
+            "Fonctionne aussi pour les recherches déjà faites, une par une ou toutes d'un coup."))
+        lay.addSpacing(10)
+        lay.addWidget(section_title("1. Recherche"))
+        self.nb_dir = QLineEdit()
+        self.nb_dir.setPlaceholderText("Dossier d'une recherche, son dossier JSON_…, ou un dossier "
+                                       "contenant plusieurs recherches")
+        self.nb_dir.textChanged.connect(lambda *_: QTimer.singleShot(200, self._nb_scan))
+        b = QPushButton("Choisir…")
+        b.setObjectName("secondary")
+        b.clicked.connect(lambda: self._pick_dir(self.nb_dir, "Dossier de résultats"))
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        row.addWidget(self.nb_dir, 1)
+        row.addWidget(b)
+        lay.addWidget(field_label("Dossier", self.nb_dir))
+        lay.addLayout(row)
+        self.nb_info = hint("")
+        lay.addWidget(self.nb_info)
+        self.nb_skip = QCheckBox("Ignorer les recherches déjà converties (dossier GeminiNotebook_… présent)")
+        self.nb_skip.setChecked(True)
+        self.nb_skip.toggled.connect(self._nb_scan)
+        self.nb_skip.setVisible(False)
+        lay.addWidget(self.nb_skip)
+        lay.addSpacing(12)
+        lay.addWidget(section_title("2. Contenu"))
+        self.nb_incl = QCheckBox("Ajouter aussi les PDF téléchargés (un seul dossier à importer)")
+        self.nb_incl.setChecked(True)
+        self.nb_incl.toggled.connect(self._nb_scan)
+        lay.addWidget(self.nb_incl)
+        grow = QHBoxLayout()
+        self.nb_group = QCheckBox("Regrouper en au plus")
+        self.nb_group.setChecked(True)
+        self.nb_group.toggled.connect(self._nb_scan)
+        self.nb_max = QSpinBox()
+        self.nb_max.setRange(5, 600)
+        self.nb_max.setValue(45)
+        self.nb_max.setSuffix(" fichiers")
+        self.nb_max.setMinimumWidth(140)
+        self.nb_max.valueChanged.connect(self._nb_scan)
+        grow.addWidget(self.nb_group)
+        grow.addWidget(self.nb_max)
+        grow.addStretch(1)
+        lay.addLayout(grow)
+        lay.addWidget(hint("Un notebook gratuit accepte 50 sources (100 à 600 selon l'abonnement), "
+                           "chacune jusqu'à 200 Mo et 500 000 mots. Au-delà du nombre choisi, les articles "
+                           "sont réunis dans des PDF communs (lots), avec un sommaire des lots."))
+        lay.addSpacing(18)
+        self.nb_btn = QPushButton("Créer le dossier pour Gemini Notebook")
+        self.nb_btn.setObjectName("primary")
+        self.nb_btn.setMinimumHeight(44)
+        self.nb_btn.clicked.connect(lambda: self._nb_start())
+        lay.addWidget(self.nb_btn)
+        self.nb_status = hint("")
+        lay.addWidget(self.nb_status)
+        lay.addStretch(1)
+        return w
+
+    def _nb_units(self, path):
+        units = find_notebook_units(path, self.nb_incl.isChecked())
+        batch = len(units) > 1 or (len(units) == 1 and os.path.normpath(units[0]["dir"])
+                                   not in (os.path.normpath(path), os.path.dirname(os.path.normpath(path))))
+        skipped = [u for u in units if batch and u["converted"] and self.nb_skip.isChecked()]
+        return [u for u in units if u not in skipped], skipped, batch
+
+    def _nb_count(self, n):
+        if self.nb_group.isChecked() and n > self.nb_max.value():
+            per = -(-n // self.nb_max.value())
+            return -(-n // per), per
+        return n, 0
+
+    def _nb_scan(self, *_):
+        d = self.nb_dir.text().strip()
+        busy = getattr(self, "_nb_busy", False)
+        if not os.path.isdir(d):
+            self.nb_info.setText("Dossier introuvable." if d else "")
+            self.nb_skip.setVisible(False)
+            self.nb_btn.setEnabled(False)
+            return
+        units, skipped, batch = self._nb_units(d)
+        self.nb_skip.setVisible(batch)
+        nj = sum(u["json"] for u in units)
+        npdf = sum(len(u["items"]) for u in units) - nj
+        if not units:
+            self.nb_info.setText(
+                f"Les {len(skipped)} recherche(s) trouvée(s) sont déjà converties (décochez la case "
+                "ci-dessous pour les refaire)." if skipped else
+                "Aucun JSON ni PDF trouvé ici, ni dans les sous-dossiers (lancez la recherche avec "
+                "« Télécharger les JSON »).")
+            self.nb_info.setToolTip("")
+        elif batch:
+            self.nb_info.setText(
+                f"{len(units)} recherches trouvées : {nj} JSON à convertir"
+                + (f", {npdf} PDF téléchargés" if npdf else "")
+                + " → un dossier GeminiNotebook_… dans chacune"
+                + (f" ({len(skipped)} déjà convertie(s) ignorée(s))" if skipped else "") + ".")
+            self.nb_info.setToolTip("\n".join(f"{u['label']} : {u['json']} JSON" for u in units[:60])
+                                    + ("\n…" if len(units) > 60 else ""))
+        else:
+            u = units[0]
+            files, per = self._nb_count(len(u["items"]))
+            where = ("" if os.path.normpath(u["dir"]) == os.path.normpath(d)
+                     else f" (recherche : {u['label']})")
+            self.nb_info.setText(f"{nj} JSON à convertir" + (f", {npdf} PDF téléchargés" if npdf else "")
+                                 + (f" → {files} fichiers (lots d'environ {per} articles)" if per
+                                    else f" → {files} fichier(s)") + where)
+            self.nb_info.setToolTip("")
+        self.nb_btn.setText("Créer les dossiers pour Gemini Notebook" if batch and len(units) > 1
+                            else "Créer le dossier pour Gemini Notebook")
+        self.nb_btn.setEnabled(bool(units) and not busy)
+
+    def _nb_start(self, path=None, auto=False):
+        d = path or self.nb_dir.text().strip()
+        if not d or not os.path.isdir(d):
+            return
+        units, _, batch = self._nb_units(d) if not auto else (
+            find_notebook_units(d, self.nb_incl.isChecked()), [], False)
+        units = [dict(u, auto=auto) for u in units if u["items"]]
+        if not units:
+            return
+        if not hasattr(self, "_nb_queue"):
+            self._nb_queue = []
+        self._nb_queue += units
+        if getattr(self, "_nb_busy", False):
+            # une conversion est déjà en cours (ex. recherches de la file qui se suivent) :
+            # celle-ci attend son tour au lieu d'être perdue
+            return
+        self._nb_busy = True
+        self.nb_btn.setEnabled(False)
+        self._nb_report = {"root": d, "units": 0, "json": 0, "pdf": 0, "lots": 0, "fail": [], "outs": [],
+                           "auto": auto}
+        QTimer.singleShot(0, self._nb_next_unit)
+
+    def _nb_next_unit(self):
+        if not self._nb_queue:
+            return self._nb_finish()
+        u = self._nb_queue.pop(0)
+        d, items = u["dir"], u["items"]
+        base = os.path.basename(os.path.normpath(d))
+        out = os.path.join(d, f"GeminiNotebook_{base}")
+        k = 2
+        while os.path.exists(out):
+            out = os.path.join(d, f"GeminiNotebook_{base}_{k}")
+            k += 1
+        try:
+            os.makedirs(out, exist_ok=True)
+            work = os.path.join(out, ".articles") if (self.nb_group.isChecked()
+                                                      and len(items) > self.nb_max.value()) else out
+            os.makedirs(work, exist_ok=True)
+        except OSError as e:
+            self._nb_report["fail"].append(f"{u['label']} (dossier non créé : {e.strerror or e})")
+            QTimer.singleShot(0, self._nb_next_unit)
+            return
+        meta = results_meta(d)
+        if not meta and os.path.dirname(d):
+            meta = results_meta(os.path.dirname(d))
+        self._nb = {"dir": d, "out": out, "work": work, "items": items, "i": 0, "done": [], "fail": [],
+                    "meta": meta, "auto": u.get("auto"), "label": u["label"]}
+        self._nb_report["units"] += 1
+        QTimer.singleShot(0, self._nb_step)
+
+    def _nb_step(self):
+        st = self._nb
+        if st["i"] < len(st["items"]):
+            kind, src, name = st["items"][st["i"]]
+            st["i"] += 1
+            dest = os.path.join(st["work"], name)
+            try:
+                if kind == "json":
+                    with open(src, encoding="utf-8") as f:
+                        doc = json.load(f)
+                    ok = render_pdf(json_doc_html(doc, st["meta"].get(str(doc.get("pmid") or ""))),
+                                    dest, doc.get("titre") or name, self._ui_font)
+                else:
+                    shutil.copy2(src, dest)
+                    ok = True
+                (st["done"] if ok else st["fail"]).append((kind, dest, name))
+            except Exception as e:  # noqa
+                st["fail"].append((kind, src, f"{name} ({type(e).__name__})"))
+            left = len(self._nb_queue)
+            msg = (f"Gemini Notebook : {st['label']} — {st['i']} / {len(st['items'])}…"
+                   + (f" ({left} recherche(s) en attente)" if left else ""))
+            self.nb_status.setText(msg)
+            if st["auto"]:
+                self.phase.setText(msg)
+            QTimer.singleShot(0, self._nb_step)
+            return
+        lots = 0
+        if st["work"] != st["out"]:
+            try:
+                lots = self._nb_group(st)
+            except Exception as e:  # noqa
+                st["fail"].append(("lot", st["out"], f"regroupement en lots ({type(e).__name__})"))
+        r = self._nb_report
+        nj = sum(1 for k, _, _ in st["done"] if k == "json")
+        r["json"] += nj
+        r["pdf"] += len(st["done"]) - nj
+        r["lots"] += lots
+        r["fail"] += [f"{st['label']} : {n}" for _, _, n in st["fail"]]
+        r["outs"].append((st["out"], st["auto"], nj, len(st["done"]) - nj, lots, len(st["fail"])))
+        QTimer.singleShot(0, self._nb_next_unit)
+
+    def _nb_finish(self):
+        r = self._nb_report
+        self._nb_busy = False
+        self._nb_scan()
+        if not r["outs"]:
+            self.nb_status.setText("Rien n'a été créé. " + "; ".join(r["fail"][:5]))
+            return
+        fails = (f" {len(r['fail'])} échec(s) : " + ", ".join(r["fail"][:5])
+                 + ("…" if len(r["fail"]) > 5 else "") + ".") if r["fail"] else ""
+        if len(r["outs"]) == 1:
+            out = r["outs"][0][0]
+            msg = (f"Dossier prêt : {os.path.basename(out)} — {r['json']} JSON convertis en PDF"
+                   + (f", {r['pdf']} PDF ajoutés" if r["pdf"] else "")
+                   + (f", réunis en {r['lots']} fichiers" if r["lots"] else "") + "." + fails
+                   + " Importez ces PDF dans Gemini Notebook (glisser-déposer).")
+        else:
+            msg = (f"{len(r['outs'])} dossiers GeminiNotebook_… créés (un par recherche) : "
+                   f"{r['json']} JSON convertis en PDF"
+                   + (f", {r['pdf']} PDF ajoutés" if r["pdf"] else "")
+                   + (f", {r['lots']} lots" if r["lots"] else "") + "." + fails
+                   + " Chaque dossier s'importe dans son propre notebook.")
+        self.nb_status.setText(msg)
+        autos = [o for o in r["outs"] if o[1]]
+        for out, _, nj, npdf, lots, nf in autos:
+            self._append(f"\n📘 Gemini Notebook : {os.path.basename(out)} — {nj} JSON convertis"
+                         + (f", {npdf} PDF ajoutés" if npdf else "") + (f", {lots} lots" if lots else "")
+                         + (f", {nf} échec(s)" if nf else "") + ".\n", "json")
+        if len(autos) < len(r["outs"]):
+            self._open_path(r["outs"][0][0] if len(r["outs"]) == 1 else r["root"])
+        self._nb_report = {"root": "", "units": 0, "json": 0, "pdf": 0, "lots": 0, "fail": [], "outs": [],
+                           "auto": False}
+
+    def _nb_group(self, st):
+        """Réunit les PDF en lots (pypdf) pour rester sous la limite de sources ; sommaire.txt."""
+        from pypdf import PdfWriter
+        items = st["done"]
+        per = -(-len(items) // self.nb_max.value())
+        lots, lines = 0, []
+        for gi in range(0, len(items), per):
+            chunk = items[gi:gi + per]
+            lots += 1
+            name = f"Lot_{lots:02d}_articles_{gi + 1}-{gi + len(chunk)}.pdf"
+            w = PdfWriter()
+            kept = []
+            for kind, path, nm in chunk:
+                try:
+                    w.append(path)
+                    kept.append(nm)
+                except Exception:  # noqa  (PDF protégé ou abîmé : copié à part)
+                    shutil.copy2(path, os.path.join(st["out"], nm))
+                    lines.append(f"(à part) {nm} : PDF illisible pour la fusion, copié seul")
+            with open(os.path.join(st["out"], name), "wb") as f:
+                w.write(f)
+            lines.append(f"{name} :")
+            lines += [f"    {nm}" for nm in kept]
+        with open(os.path.join(st["out"], "sommaire_des_lots.txt"), "w", encoding="utf-8") as f:
+            f.write("Contenu des lots (Gemini Notebook)\n\n" + "\n".join(lines) + "\n")
+        shutil.rmtree(st["work"], ignore_errors=True)
+        return lots
 
     def _build_rename_page(self):
         w = QWidget()
@@ -3364,9 +4108,9 @@ class MainWindow(QMainWindow):
         self.log_bg = QColor(color).name() if QColor(color).isValid() else LOG_THEMES["nuit"][1]
         light = QColor(self.log_bg).lightnessF() > 0.6
         self.log_light = light
-        fg = "#1C1D33" if light else C["log_fg"]
+        fg = "#17211B" if light else C["log_fg"]
         self.log.setStyleSheet(f"QPlainTextEdit#log {{ background: {self.log_bg}; color: {fg}; "
-                               f"border: 1px solid {'#C9C8D8' if light else '#2A2B45'}; }}")
+                               f"border: 1px solid {'#C3CCC5' if light else C['log_border']}; }}")
         self.log_swatch.setStyleSheet(f"background:{self.log_bg}; border:1px solid {C['rule']}; "
                                       "border-radius:6px;")
         idx = next((i for i in range(self.log_theme.count())
@@ -3378,17 +4122,18 @@ class MainWindow(QMainWindow):
 
     def _log_palette(self):
         if getattr(self, "log_light", False):   # fond clair : teintes plus foncées, lisibles
-            return {"pdf": "#1B7F45", "nopdf": "#A0219A", "json": "#0B6E8F", "warn": "#9A5B00",
-                    "err": "#B3261E", "dim": "#6B6C80", None: "#1C1D33"}
-        return {"pdf": C["log_pdf"], "nopdf": C["log_nopdf"], "json": C["log_json"], "warn": "#E6B45C",
+            return {"pdf": "#0A7A3C", "nopdf": "#8A5B00", "json": "#1C67A8", "warn": "#8A5B00",
+                    "err": "#C2261F", "dim": "#56635B", None: "#17211B"}
+        return {"pdf": C["log_pdf"], "nopdf": C["log_nopdf"], "json": C["log_json"], "warn": C["log_warn"],
                 "err": "#F08A82", "dim": C["log_dim"], None: C["log_fg"]}
 
     def _recolor_log(self):
         """Réapplique les couleurs au journal existant après un changement de fond."""
         v = getattr(self, "_viewing", None)
-        lines = (v.get("_log") or []) if v is not None else getattr(self, "_log_lines", [])
-        if not lines:
+        if v is not None:
+            self._view_job(v)          # re-rendu complet (y compris les messages « en attente »)
             return
+        lines = getattr(self, "_log_lines", [])
         self.log.clear()
         for text, kind in lines[-20000:]:
             self._append(text, kind, record=False)
@@ -3655,6 +4400,7 @@ class MainWindow(QMainWindow):
                 "filters": labels, "outdir": outdir, "max": self.max_results.value(),
                 "sort": self._sort_key(), "getpdf": self.getpdf.isChecked(),
                 "getjson": self.getjson.isChecked() and self.getjson.isEnabled(),
+                "json2pdf": self.json2pdf.isChecked() and self.json2pdf.isEnabled(),
                 "sources": self._selected_sources() if self.sources_sec.isEnabled() else None,
                 "passes": self.passes.value(), "status": "attente", "summary": ""}
 
@@ -3964,6 +4710,11 @@ class MainWindow(QMainWindow):
             self.open_xlsx_btn.setEnabled(bool(self.excel_path) and os.path.exists(self.excel_path))
             if self.run_kind == "search":
                 self.imp_results.setText(self.results_dir)
+                self.nb_dir.setText(self.results_dir)
+                want = (self.current_job.get("json2pdf") if self.current_job is not None
+                        else self.json2pdf.isChecked() and self.json2pdf.isEnabled())
+                if code == 0 and want and any(d.startswith("JSON_") for d in os.listdir(self.results_dir)):
+                    QTimer.singleShot(200, lambda d=self.results_dir: self._nb_start(d, auto=True))
         self.proc.deleteLater()
         self.proc = None
         if self.queue_active and self.current_job is not None:
@@ -4005,10 +4756,15 @@ class MainWindow(QMainWindow):
         self.passes.setValue(int(s.get("passes", 0)))
         self.getpdf.setChecked(bool(s.get("getpdf", True)))
         self.getjson.setChecked(bool(s.get("getjson", False)))
+        self.json2pdf.setEnabled(self.getjson.isChecked())
+        self.json2pdf.setChecked(bool(s.get("json2pdf", False)))
         src = s.get("sources")
         for k, cb in self.source_boxes.items():
             cb.setChecked(not isinstance(src, list) or k in src)
-        self._apply_log_bg(s.get("log_bg") or LOG_THEMES["nuit"][1])
+        lb = s.get("log_bg") or LOG_THEMES["nuit"][1]
+        if lb.lower() == "#111222":          # ancien fond par défaut (1.3-1.7) -> nouveau défaut
+            lb = LOG_THEMES["nuit"][1]
+        self._apply_log_bg(lb)
         idx = {"best": 0, "recent": 1, "both": 2}.get(s.get("sort", "best"), 0)
         self.sort_group.button(idx).setChecked(True)
         self.outdir.setText(s.get("outdir") or os.path.join(
@@ -4050,6 +4806,7 @@ class MainWindow(QMainWindow):
             "passes": self.passes.value(),
             "getpdf": self.getpdf.isChecked(),
             "getjson": self.getjson.isChecked(),
+            "json2pdf": self.json2pdf.isChecked(),
             "sources": self._selected_sources(),
             "log_bg": getattr(self, "log_bg", LOG_THEMES["nuit"][1]),
             "sort": self._sort_key(),
@@ -4106,117 +4863,141 @@ def stylesheet(ui, mono):
 QMainWindow, #formPage, QScrollArea, QScrollArea > QWidget > QWidget {{ background: {C['slide']}; }}
 QTabWidget::pane {{ border: none; background: {C['slide']}; }}
 QTabWidget#subTabs QTabBar::tab {{ margin: 0 18px 0 0; font-size: 13px; }}
-#whenBox {{ background: {C['panel']}; border-left: 4px solid {C['hema']}; border-radius: 6px; }}
+#whenBox {{ background: {C['when_bg']}; border: 1px solid {C['rule']}; border-left: 4px solid {C['hema']};
+    border-radius: 8px; }}
 #whenTitle {{ font-weight: 700; color: {C['hema']}; }}
 #pageTitle {{ font-size: 17px; font-weight: 700; padding: 2px 0 6px 0; }}
+#editBar {{ background: {C['eosin_soft']}; border: 1px solid {C['focus']}; border-radius: 8px; }}
+#editBar QLabel {{ color: {C['ink']}; font-weight: 600; }}
 QTabBar {{ background: {C['slide']}; }}
 QTabBar::tab {{ background: transparent; color: {C['muted']}; padding: 12px 4px 10px 4px;
                margin: 0 10px 0 28px; border: none; border-bottom: 3px solid transparent; font-size: 14px; }}
 QTabBar::tab:selected {{ color: {C['ink']}; border-bottom: 3px solid {C['hema']}; font-weight: 600; }}
-QTabBar::tab:hover:!selected {{ color: {C['ink']}; }}
+QTabBar::tab:hover:!selected {{ color: {C['ink']}; border-bottom: 3px solid {C['rule']}; }}
+QTabBar::tab:focus {{ color: {C['focus']}; }}
 #header {{ background: {C['panel']}; border-bottom: 1px solid {C['rule']}; }}
 #appTitle {{ font-size: 19px; font-weight: 700; letter-spacing: 0.2px; }}
-#scriptChip {{ padding: 5px 10px; border-radius: 6px; font-family: "{mono}"; font-size: 12px; }}
+#scriptChip {{ padding: 5px 10px; border-radius: 8px; font-family: "{mono}"; font-size: 12px; }}
 #scriptChip[state="ok"] {{ background: {C['hema_soft']}; color: {C['hema']}; }}
-#scriptChip[state="bad"] {{ background: #FBE5E3; color: {C['err']}; }}
+#scriptChip[state="bad"] {{ background: {C['err_soft']}; color: {C['err']}; }}
 #sectionTitle {{ font-size: 16px; font-weight: 700; padding-bottom: 4px; }}
 #fieldLabel {{ font-weight: 600; font-size: 13px; color: {C['ink']}; padding-top: 6px; }}
 #hint {{ color: {C['muted']}; font-size: 12.5px; }}
 #fieldError {{ color: {C['err']}; font-size: 12.5px; font-weight: 600; }}
 #preview {{ color: {C['muted']}; font-size: 12.5px; font-family: "{mono}"; background: {C['panel']};
-            border: 1px dashed {C['rule']}; border-radius: 6px; padding: 8px 10px; margin-top: 6px; }}
-QLineEdit, QSpinBox, QDateTimeEdit, QPlainTextEdit#query {{
-    background: {C['panel']}; border: 1px solid {C['rule']}; border-radius: 6px; padding: 7px 9px;
-    selection-background-color: {C['hema_soft']}; selection-color: {C['ink']}; }}
+            border: 1px dashed {C['rule']}; border-radius: 8px; padding: 8px 10px; margin-top: 6px; }}
+QLineEdit, QSpinBox, QDateTimeEdit, QPlainTextEdit#query, QPlainTextEdit {{
+    background: {C['panel']}; border: 1px solid {C['rule']}; border-radius: 8px; padding: 7px 9px;
+    color: {C['ink']}; selection-background-color: {C['hema_soft']}; selection-color: {C['ink']}; }}
 QLineEdit:focus, QSpinBox:focus, QDateTimeEdit:focus, QPlainTextEdit#query:focus {{
-    border: 2px solid {C['hema']}; padding: 6px 8px; }}
-QLineEdit:disabled, QSpinBox:disabled, QDateTimeEdit:disabled {{ color: #A3A4B5; background: #EFEEF4; }}
-QLineEdit[readOnly="true"] {{ background: #EFEEF4; color: {C['muted']}; }}
+    border: 2px solid {C['focus']}; padding: 6px 8px; }}
+QLineEdit:disabled, QSpinBox:disabled, QDateTimeEdit:disabled {{ color: {C['disabled']};
+    background: {C['disabled_bg']}; }}
+QLineEdit[readOnly="true"] {{ background: {C['readonly_bg']}; color: {C['muted']}; }}
 QPlainTextEdit#query {{ font-family: "{mono}"; font-size: 15px; padding: 10px 12px; }}
 QPlainTextEdit#query:focus {{ padding: 9px 11px; }}
 QLineEdit, QSpinBox, QDateTimeEdit {{ min-height: 22px; }}
 QSpinBox {{ padding-right: 30px; }}
 QSpinBox::up-button, QSpinBox::down-button {{ subcontrol-origin: border; width: 26px;
     border: none; border-left: 1px solid {C['rule']}; background: transparent; }}
-QSpinBox::up-button {{ subcontrol-position: top right; border-top-right-radius: 6px; }}
-QSpinBox::down-button {{ subcontrol-position: bottom right; border-bottom-right-radius: 6px; }}
+QSpinBox::up-button {{ subcontrol-position: top right; border-top-right-radius: 8px; }}
+QSpinBox::down-button {{ subcontrol-position: bottom right; border-bottom-right-radius: 8px; }}
 QSpinBox::up-button:hover, QSpinBox::down-button:hover {{ background: {C['hema_soft']}; }}
-QSpinBox::up-arrow {{ image: url({os.path.join(RES, 'up.svg').replace(os.sep, '/')}); width: 10px; height: 6px; }}
-QSpinBox::down-arrow {{ image: url({os.path.join(RES, 'down.svg').replace(os.sep, '/')}); width: 10px; height: 6px; }}
-QPushButton {{ border-radius: 6px; padding: 8px 14px; font-weight: 600; }}
-QPushButton#primary {{ background: {C['hema']}; color: white; font-size: 15px; border: none; }}
-QPushButton#primary:hover {{ background: #2F327A; }}
-QPushButton#primary:pressed {{ background: #262866; }}
-QPushButton#primary:disabled {{ background: #A9AAD0; }}
-QPushButton#primary:focus {{ outline: none; border: 2px solid {C['eosin']}; }}
+QSpinBox::up-arrow {{ image: url({theme_svg('up.svg')}); width: 10px; height: 6px; }}
+QSpinBox::down-arrow {{ image: url({theme_svg('down.svg')}); width: 10px; height: 6px; }}
+QPushButton {{ border-radius: 8px; padding: 8px 14px; font-weight: 600; }}
+QPushButton#primary {{ background: {C['hema']}; color: {C['on_accent']}; font-size: 15px; border: none; }}
+QPushButton#primary:hover {{ background: {C['accent_hover']}; }}
+QPushButton#primary:pressed {{ background: {C['accent_pressed']}; }}
+QPushButton#primary:disabled {{ background: {C['accent_disabled']}; color: {C['on_accent']}; }}
+QPushButton#primary:focus {{ outline: none; border: 2px solid {C['focus']}; }}
 QPushButton#secondary {{ background: {C['panel']}; border: 1px solid {C['rule']}; color: {C['ink']}; }}
 QPushButton#secondary:hover {{ border-color: {C['hema']}; color: {C['hema']}; }}
-QPushButton#secondary:focus {{ border: 2px solid {C['hema']}; }}
-QPushButton#secondary:disabled {{ color: #A3A4B5; }}
+QPushButton#secondary:pressed {{ background: {C['hema_soft']}; }}
+QPushButton#secondary:focus {{ border: 2px solid {C['focus']}; }}
+QPushButton#secondary:disabled {{ color: {C['disabled']}; border-color: {C['rule']}; }}
 QPushButton#ghost, QToolButton#ghost {{ background: transparent; border: none; color: {C['hema']};
     padding: 6px 8px; font-weight: 600; }}
 QPushButton#ghost:hover, QToolButton#ghost:hover {{ text-decoration: underline; }}
+QPushButton#ghost:focus {{ border: 2px solid {C['focus']}; }}
 QPushButton#segment {{ background: {C['panel']}; border: 1px solid {C['rule']}; color: {C['ink']};
     padding: 8px 18px; border-radius: 0; font-weight: 600; }}
-QPushButton#segment[pos="first"] {{ border-top-left-radius: 6px; border-bottom-left-radius: 6px; }}
-QPushButton#segment[pos="last"] {{ border-top-right-radius: 6px; border-bottom-right-radius: 6px; }}
+QPushButton#segment[pos="first"] {{ border-top-left-radius: 8px; border-bottom-left-radius: 8px; }}
+QPushButton#segment[pos="last"] {{ border-top-right-radius: 8px; border-bottom-right-radius: 8px; }}
 QPushButton#segment[pos="mid"], QPushButton#segment[pos="last"] {{ border-left: none; }}
-QPushButton#segment:checked {{ background: {C['hema']}; color: white; border-color: {C['hema']}; }}
-QPushButton#segment:focus {{ border: 2px solid {C['eosin']}; }}
+QPushButton#segment:checked {{ background: {C['hema']}; color: {C['on_accent']}; border-color: {C['hema']}; }}
+QPushButton#segment:focus {{ border: 2px solid {C['focus']}; }}
 QToolButton#disclosure {{ border: none; background: transparent; color: {C['hema']}; font-weight: 600;
     padding: 5px 0; }}
-QToolButton#disclosure:focus {{ text-decoration: underline; }}
-QPlainTextEdit#finalQuery {{ background: {C['hema_soft']}; border: 1px solid #CFCFE6; border-radius: 6px;
-    font-family: "{mono}"; font-size: 12.5px; padding: 6px 8px; }}
-QTableWidget#queue {{ background: {C['panel']}; border: 1px solid {C['rule']}; border-radius: 6px;
-    alternate-background-color: #FAFAFC; selection-background-color: {C['hema_soft']};
-    selection-color: {C['ink']}; font-size: 13px; }}
+QToolButton#disclosure:focus {{ color: {C['focus']}; text-decoration: underline; }}
+QPlainTextEdit#finalQuery {{ background: {C['hema_soft']}; border: 1px solid {C['final_border']};
+    border-radius: 8px; font-family: "{mono}"; font-size: 12.5px; padding: 6px 8px; }}
+QTableWidget#queue {{ background: {C['panel']}; border: 1px solid {C['rule']}; border-radius: 8px;
+    alternate-background-color: {C['alt_row']}; selection-background-color: {C['hema_soft']};
+    selection-color: {C['ink']}; font-size: 13px; gridline-color: {C['rule']}; }}
 QTableWidget#queue::item {{ padding: 6px 8px; border: none; }}
+QTableWidget#queue:focus {{ border: 2px solid {C['focus']}; }}
 QHeaderView::section {{ background: {C['slide']}; border: none; border-bottom: 1px solid {C['rule']};
     padding: 6px 8px; font-weight: 600; font-size: 12.5px; color: {C['muted']}; }}
-QComboBox {{ background: {C['panel']}; border: 1px solid {C['rule']}; border-radius: 6px; padding: 6px 9px;
+QComboBox {{ background: {C['panel']}; border: 1px solid {C['rule']}; border-radius: 8px; padding: 6px 9px;
     min-height: 22px; }}
-QComboBox:focus {{ border: 2px solid {C['hema']}; padding: 5px 8px; }}
-QTreeWidget#filterTree {{ background: {C['panel']}; border: 1px solid {C['rule']}; border-radius: 6px;
+QComboBox:focus {{ border: 2px solid {C['focus']}; padding: 5px 8px; }}
+QComboBox QAbstractItemView {{ background: {C['panel']}; selection-background-color: {C['hema_soft']};
+    selection-color: {C['ink']}; border: 1px solid {C['rule']}; }}
+QTreeWidget#filterTree {{ background: {C['panel']}; border: 1px solid {C['rule']}; border-radius: 8px;
     padding: 4px; font-size: 13.5px; selection-background-color: {C['hema_soft']}; selection-color: {C['ink']}; }}
 QTreeWidget#filterTree::item {{ padding: 3px 2px; }}
-QDialog {{ background: {C['slide']}; }}
-QPlainTextEdit#filterJson {{ background: {C['panel']}; border: 1px solid {C['rule']}; border-radius: 6px;
+QDialog, QMessageBox {{ background: {C['slide']}; }}
+QPlainTextEdit#filterJson {{ background: {C['panel']}; border: 1px solid {C['rule']}; border-radius: 8px;
     font-family: "{mono}"; font-size: 12.5px; padding: 8px; }}
-QCheckBox:disabled, QToolButton#disclosure:disabled {{ color: #A3A4B5; }}
+QCheckBox:disabled, QRadioButton:disabled, QToolButton#disclosure:disabled {{ color: {C['disabled']}; }}
 QCheckBox, QRadioButton {{ spacing: 8px; }}
 QCheckBox::indicator, QRadioButton::indicator {{ width: 16px; height: 16px; }}
-QCheckBox::indicator {{ border: 1px solid #A7A8BC; border-radius: 4px; background: {C['panel']}; }}
+QCheckBox::indicator {{ border: 1px solid {C['check_border']}; border-radius: 4px; background: {C['panel']}; }}
 QCheckBox::indicator:checked {{ background: {C['hema']}; border-color: {C['hema']};
-    image: url({os.path.join(RES, 'check.svg').replace(os.sep, '/')}); }}
-QCheckBox:focus, QRadioButton:focus {{ color: {C['hema']}; }}
+    image: url({theme_svg('check.svg')}); }}
+QCheckBox:focus, QRadioButton:focus {{ color: {C['focus']}; }}
+QMenuBar {{ background: {C['panel']}; border-bottom: 1px solid {C['rule']}; }}
+QMenuBar::item {{ padding: 5px 10px; background: transparent; }}
+QMenuBar::item:selected {{ background: {C['hema_soft']}; border-radius: 6px; }}
+QMenu {{ background: {C['panel']}; border: 1px solid {C['rule']}; padding: 4px; }}
+QMenu::item {{ padding: 6px 22px 6px 14px; border-radius: 6px; }}
+QMenu::item:selected {{ background: {C['hema_soft']}; color: {C['ink']}; }}
+QMenu::item:disabled {{ color: {C['disabled']}; }}
+QMenu::separator {{ height: 1px; background: {C['rule']}; margin: 4px 8px; }}
 #logPanel {{ background: {C['log_bg']}; }}
 #logPanel QLabel {{ color: {C['log_fg']}; }}
-#logTitle {{ font-size: 16px; font-weight: 700; color: white; }}
+#logTitle {{ font-size: 16px; font-weight: 700; color: {C['log_fg']}; }}
+#viewLbl {{ color: {C['log_fg']}; }}
+#viewBar {{ background: {C['chip_bg']}; border-radius: 8px; }}
 #stateChip {{ padding: 4px 10px; border-radius: 10px; font-size: 12px; font-weight: 600;
-    background: #2A2B45; color: {C['log_fg']}; }}
-#stateChip[state="run"] {{ background: #34377F; color: white; }}
-#stateChip[state="ok"] {{ background: #1F4D3B; color: #BDEBD3; }}
-#stateChip[state="warn"] {{ background: #5A4314; color: #F3D9A4; }}
-#stateChip[state="err"] {{ background: #5C1F1B; color: #F6C0BB; }}
+    background: {C['chip_bg']}; color: {C['log_fg']}; }}
+#stateChip[state="run"] {{ background: {C['chip_run_bg']}; color: #FFFFFF; }}
+#stateChip[state="ok"] {{ background: {C['chip_ok_bg']}; color: {C['chip_ok_fg']}; }}
+#stateChip[state="warn"] {{ background: {C['chip_warn_bg']}; color: {C['chip_warn_fg']}; }}
+#stateChip[state="err"] {{ background: {C['chip_err_bg']}; color: {C['chip_err_fg']}; }}
 #statValue {{ font-size: 26px; font-weight: 700; }}
 #logPanel #statLabel {{ font-size: 12px; color: {C['log_dim']}; }}
 #logPanel #phase {{ color: {C['log_dim']}; font-size: 12.5px; }}
-QPlainTextEdit#log {{ background: #111222; border: 1px solid #2A2B45; border-radius: 6px;
+QPlainTextEdit#log {{ background: {C['log_bg']}; border: 1px solid {C['log_border']}; border-radius: 8px;
     font-family: "{mono}"; font-size: 12.5px; color: {C['log_fg']}; padding: 8px;
-    selection-background-color: #34377F; }}
-QPushButton#onDark {{ background: transparent; border: 1px solid #3A3B5C; color: {C['log_fg']}; }}
-QPushButton#onDark:hover {{ border-color: #8C8FE0; color: white; }}
-QPushButton#onDark:disabled {{ color: #4E4F6E; border-color: #2A2B45; }}
-QPushButton#danger {{ background: transparent; border: 1px solid #7A3A3A; color: #F2B8B5; }}
-QPushButton#danger:hover {{ background: #4A1E1E; }}
-QPushButton#danger:disabled {{ color: #4E4F6E; border-color: #2A2B45; }}
+    selection-background-color: {C['log_sel']}; }}
+QPushButton#onDark {{ background: transparent; border: 1px solid {C['ondark_border']}; color: {C['log_fg']}; }}
+QPushButton#onDark:hover {{ border-color: {C['ondark_hover']}; color: #FFFFFF; }}
+QPushButton#onDark:focus {{ border: 2px solid {C['ondark_hover']}; }}
+QPushButton#onDark:disabled {{ color: {C['ondark_disabled']}; border-color: {C['log_border']}; }}
+QPushButton#danger {{ background: transparent; border: 1px solid {C['danger_border']}; color: {C['danger_fg']}; }}
+QPushButton#danger:hover {{ background: {C['danger_hover']}; }}
+QPushButton#danger:focus {{ border: 2px solid {C['danger_fg']}; }}
+QPushButton#danger:disabled {{ color: {C['ondark_disabled']}; border-color: {C['log_border']}; }}
 QSplitter::handle {{ background: {C['rule']}; }}
 QScrollBar:vertical {{ background: transparent; width: 10px; margin: 2px; }}
-QScrollBar::handle:vertical {{ background: #C9C8D8; border-radius: 4px; min-height: 30px; }}
-QPlainTextEdit#log QScrollBar::handle:vertical {{ background: #3A3B5C; }}
-QScrollBar::add-line, QScrollBar::sub-line {{ height: 0; }}
-QToolTip {{ background: {C['ink']}; color: white; border: none; padding: 6px 8px; }}
+QScrollBar::handle:vertical {{ background: {C['scroll']}; border-radius: 4px; min-height: 30px; }}
+QScrollBar:horizontal {{ background: transparent; height: 10px; margin: 2px; }}
+QScrollBar::handle:horizontal {{ background: {C['scroll']}; border-radius: 4px; min-width: 30px; }}
+QPlainTextEdit#log QScrollBar::handle:vertical {{ background: {C['log_scroll']}; }}
+QScrollBar::add-line, QScrollBar::sub-line {{ height: 0; width: 0; }}
+QToolTip {{ background: {C['tooltip_bg']}; color: {C['tooltip_fg']}; border: none; padding: 6px 8px; }}
 """
 
 
@@ -4385,8 +5166,24 @@ def main():
     f = QFont(ui)
     f.setPointSizeF(10.5)
     app.setFont(f)
+    set_theme(system_scheme())
+    log(f"apparence : {CURRENT_THEME}")
     app.setStyleSheet(stylesheet(ui, mono))
     win = MainWindow()
+
+    def scheme_changed(*_):
+        set_theme(system_scheme())
+        app.setStyleSheet(stylesheet(ui, mono))
+        for h in list(_HIGHLIGHTERS):
+            try:
+                h.refresh_formats()
+            except RuntimeError:
+                _HIGHLIGHTERS.remove(h)
+        win.theme_changed()
+    try:
+        app.styleHints().colorSchemeChanged.connect(scheme_changed)
+    except Exception:  # noqa
+        pass
     win.ensure_on_screen()
     win.show()
     g = win.frameGeometry()

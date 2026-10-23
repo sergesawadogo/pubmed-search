@@ -8,10 +8,10 @@ avec le Python intégré à l'application. Rien d'autre à installer pour l'util
 
 | Système | Fichier | Installation |
 |---|---|---|
-| Ubuntu / Debian | `pubmed-search-gui_1.7.0_amd64.deb` | `sudo apt install ./pubmed-search-gui_1.7.0_amd64.deb` |
-| Windows 10 / 11 (64 bits) | `PubMedSearch-Setup-1.7.0.exe` | double-clic (droits administrateur) |
-| macOS 12+ Apple Silicon (M1…M4) | `PubMedSearch-1.7.0-macOS-AppleSilicon.dmg` | ouvrir le .dmg, glisser l'app dans Applications |
-| macOS 12+ Intel | `PubMedSearch-1.7.0-macOS-Intel.dmg` | idem |
+| Ubuntu / Debian | `pubmed-search-gui_1.8.1_amd64.deb` | `sudo apt install ./pubmed-search-gui_1.8.1_amd64.deb` |
+| Windows 10 / 11 (64 bits) | `PubMedSearch-Setup-1.8.1.exe` | double-clic (droits administrateur) |
+| macOS 12+ Apple Silicon (M1…M4) | `PubMedSearch-1.8.1-macOS-AppleSilicon.dmg` | ouvrir le .dmg, glisser l'app dans Applications |
+| macOS 12+ Intel | `PubMedSearch-1.8.1-macOS-Intel.dmg` | idem |
 
 L'installateur Windows n'est pas signé numériquement : au premier lancement, Windows
 SmartScreen affiche « Windows a protégé votre ordinateur » → *Informations complémentaires*
@@ -51,6 +51,10 @@ installées automatiquement par `apt` comme dépendances.
   copies renommées, Excel des références et bibliographie Word Vancouver ;
 - **PDF** : sous-onglet *Importer les PDF d'une recherche PubMed Search* : ouvre par lots de 10 les liens « À ouvrir manuellement » d'error.txt,
   puis importe les PDF enregistrés (`--import-pdf`).
+- **PDF → Pour Gemini Notebook** : JSON convertis en PDF à texte sélectionnable (QTextDocument +
+  QPdfWriter, polices intégrées), PDF téléchargés ajoutés, regroupement en lots (pypdf) sous la
+  limite de sources ; option automatique en fin de recherche ; conversion des recherches
+  déjà faites, une par une ou par lot (dossier contenant plusieurs recherches).
 - **Partager** : archive zip du dossier de résultats (contenu au choix), découpage en archives
   autonomes sous la limite par mail ou lien SwissTransfer, message ouvert dans Thunderbird ou
   Outlook avec la pièce jointe.
@@ -85,11 +89,11 @@ Si une nouvelle version du script importe une bibliothèque absente du Python in
 
 **Linux (.deb)** : `./packaging/linux/build_deb.sh` → `dist/pubmed-search-gui_<version>_amd64.deb`
 
-**Windows (.exe) depuis Linux** (méthode utilisée pour la 1.7.0) : Python Windows
+**Windows (.exe) depuis Linux** (méthode utilisée pour la 1.8.1) : Python Windows
 (python-build-standalone, `uv python install cpython-3.11-windows-x86_64-none`) exécuté sous
 Wine pour PyInstaller (`wine python.exe -m PyInstaller --workpath build-win --distpath dist-win
 pubmed_gui.spec`, sortie redirigée par un tube `| cat`), puis
-`makensis -DVERSION=1.7.0 -DSRCDIR=../../dist-win/PubMedSearch packaging/windows/installer.nsi`
+`makensis -DVERSION=1.8.1 -DSRCDIR=../../dist-win/PubMedSearch packaging/windows/installer.nsi`
 (NSIS, installateur 64 bits pour Windows 10/11).
 
 **Windows (.exe)**, sur un PC Windows avec Python 3.10+ :

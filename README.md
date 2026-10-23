@@ -13,10 +13,10 @@ Page des téléchargements : **[Dernière version](https://github.com/sergesawad
 
 | Fichier | Pour |
 |---|---|
-| `PubMedSearch-Setup-1.7.0.exe` | Windows 10 et 11 (64 bits) |
-| `PubMedSearch-1.7.0-macOS-AppleSilicon.dmg` | Mac à puce Apple (M1, M2, M3, M4…), macOS 12 Monterey ou plus récent |
-| `PubMedSearch-1.7.0-macOS-Intel.dmg` | Mac à processeur Intel, macOS 12 Monterey ou plus récent |
-| `pubmed-search-gui_1.7.0_amd64.deb` | Ubuntu 20.04+, Debian 10+, Linux Mint 20+ (64 bits) |
+| `PubMedSearch-Setup-1.8.1.exe` | Windows 10 et 11 (64 bits) |
+| `PubMedSearch-1.8.1-macOS-AppleSilicon.dmg` | Mac à puce Apple (M1, M2, M3, M4…), macOS 12 Monterey ou plus récent |
+| `PubMedSearch-1.8.1-macOS-Intel.dmg` | Mac à processeur Intel, macOS 12 Monterey ou plus récent |
+| `pubmed-search-gui_1.8.1_amd64.deb` | Ubuntu 20.04+, Debian 10+, Linux Mint 20+ (64 bits) |
 | `envoyer-vers-pubmed-search-1.0.0.xpi` | Extension Firefox (facultative) |
 | `SHA256SUMS.txt`, `SHA256SUMS-macOS.txt` | Empreintes pour vérifier les fichiers |
 
@@ -28,7 +28,7 @@ Rien d'autre à installer : Python et ses bibliothèques sont inclus dans l'appl
 
 ### Windows 10 / 11
 
-1. Téléchargez `PubMedSearch-Setup-1.7.0.exe` et double-cliquez dessus.
+1. Téléchargez `PubMedSearch-Setup-1.8.1.exe` et double-cliquez dessus.
 2. Windows affiche « Windows a protégé votre ordinateur » : l'installateur n'est pas signé
    numériquement. Cliquez sur **Informations complémentaires**, puis **Exécuter quand même**.
 3. Acceptez la demande d'autorisation administrateur, choisissez le dossier, terminez.
@@ -59,7 +59,7 @@ Vos réglages (`~/Library/Preferences/pubmed-search-gui`) sont conservés.
 
 ```bash
 cd ~/Téléchargements
-sudo apt install ./pubmed-search-gui_1.7.0_amd64.deb
+sudo apt install ./pubmed-search-gui_1.8.1_amd64.deb
 ```
 
 `apt` installe aussi les bibliothèques graphiques nécessaires. Lancez **PubMed Search**
@@ -209,6 +209,12 @@ sont conservés d'une session à l'autre, jusqu'à ce que la recherche soit reti
    les lignes incorrectes sont signalées (nom manquant, ni requête ni filtre, valeur hors limites).
 4. Vérifiez la file, puis **Lancer la file** (ou programmez-la).
 
+Pour corriger une recherche de la file avant son lancement : sélectionnez-la puis **Modifier
+dans Recherche**. Le formulaire se remplit et un bandeau indique la recherche modifiée ;
+**Enregistrer dans la file** la met à jour à sa place (elle n'est pas lancée tant que la
+modification est ouverte). Une recherche en cours ne peut pas être modifiée ; une recherche
+terminée modifiée est remise en attente.
+
 Si vous modifiez vos filtres, recréez le modèle : une colonne de filtre inconnue est ignorée
 et signalée à l'import.
 
@@ -272,6 +278,35 @@ sont copiés qu'une fois. En ligne de commande :
 
 ---
 
+### Préparer une recherche pour Gemini Notebook
+
+Gemini Notebook (anciennement NotebookLM) n'accepte pas les fichiers JSON. Onglet **PDF** →
+sous-onglet **Pour Gemini Notebook** : choisissez le dossier de la recherche, puis **Créer le
+dossier pour Gemini Notebook**. Chaque JSON de texte intégral devient un PDF à texte
+sélectionnable (titre, auteurs, résumé, sections, légendes des figures et tableaux,
+références), avec une mention de la source et de la licence. Les PDF téléchargés peuvent être
+ajoutés au même dossier `GeminiNotebook_…`, prêt à glisser dans un notebook.
+
+Un notebook gratuit accepte 50 sources (100 à 600 selon l'abonnement), chacune jusqu'à
+200 Mo et 500 000 mots : au-delà du nombre choisi (45 par défaut), les articles sont réunis
+dans des PDF communs (« lots ») et `sommaire_des_lots.txt` indique quel article est dans quel
+lot. L'option **Préparer aussi pour Gemini Notebook** de l'onglet Recherche le fait
+automatiquement à la fin de chaque recherche avec JSON.
+
+**Recherches déjà faites** : la conversion marche aussi pour les JSON téléchargés avant cette
+version. Le champ accepte :
+
+- le dossier d'une recherche (`Diabetes_review_31.08.2026_11h28`) ;
+- son dossier `JSON_…` (ou `PDF_…`) choisi directement ;
+- un dossier de JSON isolés (déplacés hors de leur recherche) ;
+- un dossier qui contient **plusieurs recherches** (exploré sur 3 niveaux) : chaque recherche
+  avec des JSON reçoit son propre dossier `GeminiNotebook_…`, à importer dans son propre
+  notebook. La case *Ignorer les recherches déjà converties* évite de refaire celles qui ont
+  déjà un dossier `GeminiNotebook_…`.
+
+Les fichiers JSON d'origine ne sont jamais modifiés. Les auteurs sont lus dans l'Excel de la
+recherche : si l'Excel n'est pas à côté, les PDF sont créés sans la liste des auteurs.
+
 ### Partager une recherche avec un collègue
 
 Onglet **Partager** :
@@ -300,6 +335,14 @@ messagerie habituelle (Gmail dans le navigateur ne permet pas de joindre un fich
 automatiquement).
 
 ---
+
+### Apparence, menus et raccourcis
+
+L'application suit l'apparence claire ou sombre du système. Ses couleurs reprennent celles du
+logo : le vert pour les actions et les PDF obtenus, l'ambre pour les avertissements et les
+articles sans PDF, le rouge pour les erreurs. La barre de menus donne accès à toutes les
+commandes : Ctrl+E (⌘E sur Mac) évaluer, Ctrl+Entrée lancer, Ctrl+Maj+Entrée ajouter à la file,
+Ctrl+. arrêter, Ctrl+1 à 4 pour les onglets, Ctrl+, pour les réglages, Ctrl+N nouvelle recherche.
 
 ## Questions fréquentes
 
