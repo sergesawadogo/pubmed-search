@@ -72,7 +72,7 @@ try:  # optionnel : lecture du texte des PDF (--import-pdf, contrôle API Elsevi
 except ImportError:
     PdfReader = None
 
-VERSION = "1.9.1"
+VERSION = "1.9.2"
 TOOL_NAME = "pubmed_search_py"
 DEFAULT_EMAIL = "sergesawadogo@gmail.com"
 
@@ -124,6 +124,23 @@ STOP = threading.Event()
 def log(msg=""):
     with PRINT_LOCK:
         print(msg, flush=True)
+
+
+def short_err(e):
+    """Message d'erreur court (sans l'URL, souvent longue de plusieurs milliers de caractères)."""
+    resp = getattr(e, "response", None)
+    if resp is not None and getattr(resp, "status_code", None):
+        names = {429: "trop de requêtes", 500: "erreur interne du serveur", 502: "passerelle",
+                 503: "service indisponible", 504: "délai dépassé côté serveur"}
+        return f"HTTP {resp.status_code} ({names.get(resp.status_code, resp.reason or 'erreur')})"
+    return f"{type(e).__name__} : {str(e)[:120]}"
+
+
+# services mis en pause après plusieurs échecs serveur consécutifs (les autres sources continuent)
+BREAKER_SERVICES = {"europepmc": "Europe PMC", "openalex": "OpenAlex", "unpaywall": "Unpaywall",
+                    "hal": "HAL", "crossref": "Crossref", "bioc": "NCBI BioC", "idconv": "ID converter PMC"}
+BREAKER_FAILS = 3          # échecs consécutifs (après les nouvelles tentatives) avant la pause
+BREAKER_PAUSE = (120, 300, 600)   # durée des pauses successives (s)
 
 
 def chunks(seq, n):
@@ -180,6 +197,11 @@ class Http:
         }
 
         self.counts = Counter()
+        self.skipped = Counter()      # requêtes évitées pendant la pause d'un service
+        self.paused_log = []          # (service, durée) : pour les statistiques et error.txt
+        self._fails = Counter()
+        self._down_until = {}
+        self._pauses = Counter()
         self._lock = threading.Lock()
         self._next = {}
         self._klocks = {}
@@ -216,18 +238,59 @@ class Http:
                 time.sleep(nxt - now)
             self._next[key] = time.monotonic() + interval
 
+    @staticmethod
+    def _unavailable(url, why):
+        """Réponse 503 locale (aucune requête envoyée) pendant la pause d'un service."""
+        r = requests.Response()
+        r.status_code = 503
+        r.reason = why
+        r.url = url
+        r._content = b""
+        r.headers["X-PubMed-Search"] = "service en pause"
+        return r
+
+    def is_paused(self, service):
+        return self._down_until.get(service, 0) > time.monotonic()
+
+    def _breaker(self, service, failed, detail=""):
+        if service not in BREAKER_SERVICES:
+            return
+        with self._lock:
+            if not failed:
+                self._fails[service] = 0
+                return
+            self._fails[service] += 1
+            if self._fails[service] < BREAKER_FAILS or self.is_paused(service):
+                return
+            k = self._pauses[service]
+            pause = BREAKER_PAUSE[min(k, len(BREAKER_PAUSE) - 1)]
+            self._pauses[service] += 1
+            self._down_until[service] = time.monotonic() + pause
+            self._fails[service] = BREAKER_FAILS - 1   # après la pause : un seul essai de reprise
+            self.paused_log.append((service, pause))
+        log(f"  ⏸ {BREAKER_SERVICES[service]} ne répond pas ({detail or 'erreur serveur'}, "
+            f"{BREAKER_FAILS} échecs de suite) : service mis en pause {pause // 60} min, "
+            "les autres sources continuent.")
+
     def request(self, method, url, service, retries=3, **kw):
         kw.setdefault("timeout", self.timeout)
+        if self.is_paused(service):
+            with self._lock:
+                self.skipped[service] += 1
+            return self._unavailable(url, "service en pause après des erreurs répétées")
+        if self._fails.get(service, 0) >= BREAKER_FAILS - 1 and service in BREAKER_SERVICES:
+            retries = 0   # essai de reprise : pas d'attente supplémentaire s'il échoue encore
         for attempt in range(retries + 1):
             self._throttle(service, url)
             with self._lock:
                 self.counts[service] += 1
             try:
                 r = self._session().request(method, url, **kw)
-            except requests.RequestException:
+            except requests.RequestException as e:
                 if attempt < retries:
                     time.sleep(2 ** attempt)
                     continue
+                self._breaker(service, True, type(e).__name__)
                 raise
             if r.status_code in (429, 500, 502, 503, 504) and attempt < retries:
                 ra = r.headers.get("Retry-After", "")
@@ -235,6 +298,7 @@ class Http:
                 r.close()
                 time.sleep(min(wait, 60))
                 continue
+            self._breaker(service, r.status_code in (500, 502, 503, 504), f"HTTP {r.status_code}")
             return r
 
     def ncbi(self, **params):
@@ -515,7 +579,7 @@ def elink_prlinks(http, articles):
             r.raise_for_status()
             j = r.json()
         except Exception as e:  # noqa
-            log(f"  ⚠ ELink prlinks : {e}")
+            log(f"  ⚠ ELink prlinks : {short_err(e)}")
             continue
         byid = {a.pmid: a for a in batch}
         for ls in j.get("linksets", []):
@@ -544,7 +608,7 @@ def elink_pmc_fill(http, articles):
             r.raise_for_status()
             j = r.json()
         except Exception as e:  # noqa
-            log(f"  ⚠ ELink pubmed→pmc : {type(e).__name__} {str(e)[:120]}")
+            log(f"  ⚠ ELink pubmed→pmc : {short_err(e)}")
             continue
         byid = {a.pmid: a for a in batch}
         for ls in j.get("linksets", []):
@@ -577,7 +641,7 @@ def idconv_fill(http, articles):
                 log(f"  ℹ ID converter PMC indisponible (HTTP {code}) : PMCID recherchés via "
                     f"E-utilities à la place ({n} trouvé(s)).")
                 return
-            log(f"  ⚠ ID converter PMC : {type(e).__name__} {str(e)[:120]}")
+            log(f"  ⚠ ID converter PMC : {short_err(e)}")
             continue
         byid = {a.pmid: a for a in batch}
         for rec in recs:
@@ -591,17 +655,27 @@ def idconv_fill(http, articles):
 
 
 def europepmc_enrich(http, articles):
-    for batch in chunks(articles, 100):
+    batches = list(chunks(articles, 100))
+    done, failed = 0, 0
+    for i, batch in enumerate(batches, 1):
+        if http.is_paused("europepmc"):
+            n_left = sum(len(b) for b in batches[i - 1:])
+            log(f"  ℹ Europe PMC en pause : {n_left} article(s) non enrichis par Europe PMC "
+                "(les PDF restent cherchés sur PMC S3, Unpaywall, OpenAlex, HAL, éditeurs).")
+            return
         q = "SRC:MED AND (" + " OR ".join(f"EXT_ID:{a.pmid}" for a in batch) + ")"
         try:
-            r = http.request("GET", EPMC_SEARCH, "europepmc",
+            r = http.request("GET", EPMC_SEARCH, "europepmc", retries=1,
                              params={"query": q, "resultType": "core", "format": "json",
                                      "pageSize": 1000})
             r.raise_for_status()
             results = r.json().get("resultList", {}).get("result", [])
         except Exception as e:  # noqa
-            log(f"  ⚠ Europe PMC : {e}")
+            failed += 1
+            log(f"  ⚠ Europe PMC : lot {i}/{len(batches)} non obtenu — {short_err(e)}")
             continue
+        done += len(batch)
+        log(f"  Europe PMC : {done}/{len(articles)}")
         byid = {a.pmid: a for a in batch}
         for res in results:
             a = byid.get(str(res.get("pmid") or res.get("id")))
@@ -629,7 +703,9 @@ def europepmc_enrich(http, articles):
 def openalex_enrich(http, articles):
     if not http.openalex_key:
         return
-    for batch in chunks(articles, 50):
+    for k, batch in enumerate(chunks(articles, 50), 1):
+        if k > 1 and (k - 1) % 4 == 0:
+            log(f"  OpenAlex : {min((k - 1) * 50, len(articles))}/{len(articles)}")
         try:
             r = http.request("GET", OPENALEX, "openalex",
                              params={"filter": "pmid:" + "|".join(a.pmid for a in batch),
@@ -638,7 +714,10 @@ def openalex_enrich(http, articles):
             r.raise_for_status()
             results = r.json().get("results", [])
         except Exception as e:  # noqa
-            log(f"  ⚠ OpenAlex : {e}")
+            log(f"  ⚠ OpenAlex : {short_err(e)}")
+            if http.is_paused("openalex"):
+                log("  ℹ OpenAlex en pause : enrichissement OpenAlex arrêté pour cette recherche.")
+                return
             continue
         byid = {a.pmid: a for a in batch}
         for w in results:
@@ -1690,8 +1769,19 @@ def advice(articles, http, getfree):
     """Conseils concrets d'après les échecs (clés manquantes, articles hors Open Access…)."""
     failed = [a for a in articles if not a.pdf_rel and a.free_like]
     out = []
+    for svc in sorted({k for k, _ in getattr(http, "paused_log", [])}):
+        n = http.skipped.get(svc, 0)
+        out.append(f"{BREAKER_SERVICES.get(svc, svc)} ne répondait pas pendant la recherche (erreurs serveur "
+                   f"répétées) : service mis en pause, {n} requête(s) évitée(s). Il s'agit d'une panne "
+                   "côté serveur, pas d'une erreur de la requête : relancer plus tard la même recherche "
+                   "permettra d'obtenir les liens manquants.")
     if not getfree or not failed:
         return out
+    if not any(a.attempts for a in articles):
+        out.append("Aucun téléchargement n'a été tenté (recherche interrompue avant la passe 1) : "
+                   "relancer la recherche.")
+        return out
+    failed = [a for a in failed if a.attempts]
     els = [a for a in failed if a.is_elsevier]
     if els and not http.elsevier_key:
         out.append(f"{len(els)} article(s) libre(s) Elsevier/Lancet/Cell bloqué(s) par Cloudflare : une clé "
@@ -2862,10 +2952,15 @@ def main():
                 log("ℹ CORE activé : ~10 requêtes/min (limite de l'API), seulement pour les articles "
                     "non trouvés par les autres sources"
                     + (f", {args.core_budget:g} min au plus." if args.core_budget >= 0 else "."))
+            log("  • ID converter PMC (PMCID, DOI)…")
             idconv_fill(http, articles)
+            log("  • Europe PMC (liens libres)…")
             europepmc_enrich(http, articles)
             if args.getfreepaper:
+                log("  • Liens éditeurs PubMed (LinkOut)…")
                 elink_prlinks(http, [a for a in articles if a.free != "Non" or not a.pmcid])
+                if args.openalex_key:
+                    log("  • OpenAlex…")
                 openalex_enrich(http, articles)
             # le PMCID a pu être découvert après coup
             for a in articles:
@@ -3026,6 +3121,10 @@ def main():
         log(f"  💡 {t}")
     log(f"  Durée                          : {fmt_duration(elapsed)}")
     log(f"  Requêtes HTTP                  : {http.total}  ({req_detail})")
+    if http.paused_log:
+        log("  Services mis en pause          : " + ", ".join(
+            f"{BREAKER_SERVICES.get(k, k)} ({http.skipped.get(k, 0)} requête(s) évitée(s))"
+            for k in sorted({k for k, _ in http.paused_log})))
     log(f"\n  Excel : {xlsx_path}")
     log(f"  Fichiers : {stem}_PMID_tous.txt, {stem}_PMID_sans_pdf.txt"
         + (f", {stem}_PMID_json.txt" if args.getjson else "") + ", error.txt")

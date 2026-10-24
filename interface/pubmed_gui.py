@@ -20,7 +20,7 @@ import threading
 
 APP_NAME = "PubMed Search"
 APP_ID = "pubmed-search-gui"
-APP_VERSION = "1.8.1"
+APP_VERSION = "1.8.2"
 
 
 # --------------------------------------------------------------------------- #
