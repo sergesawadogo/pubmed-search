@@ -5,7 +5,7 @@ avec un tableau Excel récapitulatif. Application de bureau pour **Windows 10 / 
 **macOS 12+ (Apple Silicon et Intel)** et **Linux (Ubuntu, Debian, Mint)**, avec une extension **Firefox** qui envoie une recherche
 PubMed vers l'application en un clic.
 
-![Fenêtre principale](docs/captures/recherche.png)
+![Fenêtre principale](docs/captures/recherche-new.png)
 
 ## Télécharger
 
