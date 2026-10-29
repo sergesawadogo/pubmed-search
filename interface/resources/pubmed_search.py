@@ -26,6 +26,14 @@ Passe JSON (--getjson), pour les articles restés sans PDF (le PDF reste priorit
   Tous les JSON ont le même schéma (voir jats_to_doc / bioc_to_doc).
   Karger : pas d'API publique de texte intégral (accès TDM sur contrat, par FTP).
 
+Passe XML JATS (--getjats), pour tous les articles PMC : dossier JATS_<nom>/ « IA locale »
+  (XML d'origine, Markdown avec tableaux complets, CSV par tableau, figures) depuis
+  PMC S3, sinon Europe PMC (XML seul).
+
+Mots-clés : <nom>_mots-cles.txt, une ligne par groupe de termes équivalents (MeSH + synonymes
+officiels, mots-clés d'auteurs, correspondance PubMed, sigles des résumés) ; --no-keywords pour
+ne pas le créer. --keywords-from-queries FICHIER : idem pour les termes d'une liste de requêtes.
+
 Le script NE contourne PAS les protections anti-robot (CAPTCHA, preuve de travail
 JavaScript, Cloudflare) : ces cas sont détectés et consignés dans error.txt.
 
@@ -72,7 +80,7 @@ try:  # optionnel : lecture du texte des PDF (--import-pdf, contrôle API Elsevi
 except ImportError:
     PdfReader = None
 
-VERSION = "1.9.2"
+VERSION = "1.10.0"
 TOOL_NAME = "pubmed_search_py"
 DEFAULT_EMAIL = "sergesawadogo@gmail.com"
 
@@ -138,7 +146,8 @@ def short_err(e):
 
 # services mis en pause après plusieurs échecs serveur consécutifs (les autres sources continuent)
 BREAKER_SERVICES = {"europepmc": "Europe PMC", "openalex": "OpenAlex", "unpaywall": "Unpaywall",
-                    "hal": "HAL", "crossref": "Crossref", "bioc": "NCBI BioC", "idconv": "ID converter PMC"}
+                    "hal": "HAL", "crossref": "Crossref", "bioc": "NCBI BioC", "idconv": "ID converter PMC",
+                    "meshapi": "API MeSH (NLM)"}
 BREAKER_FAILS = 3          # échecs consécutifs (après les nouvelles tentatives) avant la pause
 BREAKER_PAUSE = (120, 300, 600)   # durée des pauses successives (s)
 
@@ -189,7 +198,7 @@ class Http:
         self.intervals = {
             "ncbi": 0.11 if api_key else 0.35,   # 10 req/s avec clé, 3 sans
             "idconv": 0.35, "europepmc": 0.12, "unpaywall": 0.12,
-            "openalex": 0.12, "s3": 0.0, "publisher": 1.0, "handle": 0.2, "elsevier": 0.15, "hal": 0.3, "core": 6.5, "core_dl": 1.0,
+            "openalex": 0.12, "s3": 0.0, "publisher": 1.0, "handle": 0.2, "elsevier": 0.15, "hal": 0.3, "core": 6.5, "meshapi": 0.2, "core_dl": 1.0,
             "repository": 1.0,
             "bioc": 0.34,          # NCBI BioC (pas de limite publiée : 3 req/s par prudence)
             "springer": 1.0,       # forfait gratuit Springer Nature : quota journalier limité
@@ -341,6 +350,13 @@ class Article:
         self.json_source = ""
         self.json_level = ""       # "texte intégral" / "résumé"
         self.json_attempts = []    # (source, url, raison)
+        self.abstract = ""
+        self.mesh = []             # [(UI, descripteur)]
+        self.keywords = []         # mots-clés des auteurs
+        self.jats_rel = ""         # Markdown de l'article dans JATS_<nom>/
+        self.jats_source = ""
+        self.jats_info = ""
+        self.jats_note = ""
         self.springer_meta = None  # notice Springer Meta API (réutilisée par la passe JSON)
         self.oa_hint = False       # une source externe signale une version libre
         self.epmc_pdf_urls = []
@@ -498,6 +514,17 @@ def parse_pubmed_article(el):
     a.year = _year_of(art.find("Journal/JournalIssue")) or _year_of(art) or _year_of(el)
     a.pub_types = [_txt(p) for p in art.findall("PublicationTypeList/PublicationType")]
     a.authors = _parse_authors(art.findall("AuthorList/Author"))
+    ab = art.find("Abstract")
+    if ab is not None:
+        a.abstract = " ".join(_txt(t) for t in ab.findall("AbstractText"))
+    for mh in mc.findall("MeshHeadingList/MeshHeading"):
+        d = mh.find("DescriptorName")
+        if d is not None and _txt(d):
+            a.mesh.append((d.get("UI") or "", _txt(d)))
+    for kw in mc.findall("KeywordList/Keyword"):
+        t = _txt(kw)
+        if t and t not in a.keywords:
+            a.keywords.append(t)
     idlist = el.find("PubmedData/ArticleIdList")
     if idlist is not None:
         for aid in idlist.findall("ArticleId"):
@@ -1683,16 +1710,952 @@ class JsonFetcher:
 
 
 # --------------------------------------------------------------------------- #
+# Passe XML JATS : dossier « IA locale » (XML d'origine, Markdown, CSV, figures)
+# --------------------------------------------------------------------------- #
+JATS_IMG_EXT = (".jpg", ".jpeg", ".png", ".gif", ".tif", ".tiff", ".webp", ".bmp", ".svg")
+
+
+def _s3_https(u):
+    """s3://pmc-oa-opendata/KEY?md5=… -> https://pmc-oa-opendata.s3.amazonaws.com/KEY"""
+    u = (u or "").split("?", 1)[0]
+    if u.startswith("s3://pmc-oa-opendata/"):
+        return S3_BASE + u[len("s3://pmc-oa-opendata/"):]
+    return u
+
+
+def _md_esc(s):
+    return re.sub(r"\s+", " ", s or "").strip()
+
+
+def _cell_md(s):
+    return _md_esc(s).replace("|", "\\|")
+
+
+class JatsMarkdown:
+    """JATS (XML d'article PMC / Europe PMC) -> Markdown lisible par une IA, sans perte du contenu :
+    sections, paragraphes, listes, tableaux complets (Markdown, ou HTML si cellules fusionnées),
+    figures (image locale + légende), formules (LaTeX si fourni, sinon MathML), références."""
+
+    def __init__(self, xml_bytes, media=None):
+        self.root = _strip_ns(ET.fromstring(xml_bytes))
+        self.media = media or {}         # nom (minuscules, sans extension) -> chemin relatif local
+        self.online = {}                 # suppléments : nom (minuscules) -> URL en ligne (PMC S3)
+        self.tables = []                 # [(label, nom de fichier CSV, grille)]
+        self.figures = []                # [(label, chemin relatif ou "")]
+        self.out = []
+
+    # -- éléments en ligne ------------------------------------------------------------------- #
+    def inl(self, el):
+        parts = [el.text or ""]
+        for c in el:
+            t = c.tag
+            inner = self.inl(c)
+            if t in ("italic", "em"):
+                s = f"*{inner.strip()}*" if inner.strip() else ""
+            elif t == "bold":
+                s = f"**{inner.strip()}**" if inner.strip() else ""
+            elif t == "sup":
+                s = f"<sup>{inner}</sup>"
+            elif t == "sub":
+                s = f"<sub>{inner}</sub>"
+            elif t == "xref" and c.get("ref-type") == "bibr" and re.fullmatch(r"[\d,–\-\s]+", inner.strip() or "x") \
+                    and not "".join(parts).rstrip().endswith(("[", "(")):
+                s = f"[{inner.strip()}]"
+            elif t == "ext-link" or t == "uri":
+                href = c.get("href") or inner
+                s = f"[{inner.strip() or href}]({href})" if href else inner
+            elif t == "inline-formula":
+                s = self.formula(c, inline=True)
+            elif t in ("break",):
+                s = " "
+            elif t in ("fn", "table-wrap", "fig", "disp-formula", "list", "boxed-text"):
+                s = ""          # éléments de bloc : rendus après le paragraphe
+            else:
+                s = inner
+            parts.append(s)
+            parts.append(c.tail or "")
+        return "".join(parts)
+
+    def formula(self, el, inline=False):
+        tex = el.find(".//tex-math")
+        if tex is not None and "".join(tex.itertext()).strip():
+            body = "".join(tex.itertext()).strip()
+            body = re.sub(r"^\\documentclass.*?\\begin\{document\}", "", body, flags=re.S)
+            body = body.replace("\\end{document}", "").strip().strip("$")
+            return f"${body}$" if inline else f"$$\n{body}\n$$"
+        m = el.find(".//math")
+        if m is not None:
+            xml = ET.tostring(m, encoding="unicode")
+            return f"`{_md_esc(''.join(m.itertext()))}`" if inline else f"```mathml\n{xml}\n```"
+        return _md_esc("".join(el.itertext()))
+
+    # -- blocs -------------------------------------------------------------------------------- #
+    def blocks(self, el, level):
+        for c in el:
+            t = c.tag
+            if t == "sec":
+                title = c.find("title")
+                label = c.findtext("label") or ""
+                if title is not None or label:
+                    head = _md_esc(f"{label} {self.inl(title) if title is not None else ''}")
+                    self.out.append("#" * min(6, level) + " " + head)
+                self.blocks(c, level + 1)
+            elif t == "p":
+                txt = _md_esc(self.inl(c))
+                if txt:
+                    self.out.append(txt)
+                self.blocks_inside(c, level)
+            elif t == "list":
+                self.out.append("\n".join(self.list_(c)))
+            elif t == "fig":
+                self.fig(c)
+            elif t == "fig-group":
+                for f in c.findall("fig"):
+                    self.fig(f)
+            elif t == "table-wrap":
+                self.table_wrap(c)
+            elif t == "table-wrap-group":
+                for tw in c.findall("table-wrap"):
+                    self.table_wrap(tw)
+            elif t == "disp-formula":
+                self.out.append(self.formula(c))
+            elif t == "boxed-text":
+                self.out.append("> **Encadré** " + _md_esc(self.inl(c.find("caption"))) if c.find("caption") is not None
+                                else "> **Encadré**")
+                self.blocks(c, level + 1)
+            elif t == "disp-quote":
+                self.out.append("> " + _md_esc(" ".join(self.inl(p) for p in c.findall("p"))))
+            elif t == "def-list":
+                for d in c.findall("def-item"):
+                    term = _md_esc(self.inl(d.find("term"))) if d.find("term") is not None else ""
+                    dfn = _md_esc(" ".join(self.inl(p) for p in d.iter("p")))
+                    self.out.append(f"- **{term}** : {dfn}")
+            elif t == "supplementary-material":
+                self.suppl(c)
+            elif t in ("title", "label"):
+                continue
+            elif t in ("app", "ack", "glossary", "notes", "fn-group"):
+                title = c.findtext("title") or {"ack": "Acknowledgments", "glossary": "Abbreviations",
+                                                "fn-group": "Notes"}.get(t, "")
+                if title:
+                    self.out.append("#" * min(6, level) + " " + _md_esc(title))
+                if t == "fn-group":
+                    for fn in c.findall("fn"):
+                        self.out.append("- " + _md_esc(" ".join(self.inl(p) for p in fn.findall("p"))))
+                else:
+                    self.blocks(c, level + 1)
+            elif t in ("app-group",):
+                self.blocks(c, level)
+            elif len(c):
+                self.blocks(c, level)
+
+    def blocks_inside(self, p, level):
+        for c in p:
+            if c.tag in ("fig", "table-wrap", "disp-formula", "list", "boxed-text", "fig-group",
+                         "table-wrap-group", "supplementary-material"):
+                self.blocks(_wrap(c), level)
+
+    def list_(self, el, depth=0):
+        ordered = (el.get("list-type") or "") in ("order", "arabic", "alpha-lower", "alpha-upper",
+                                                   "roman-lower", "roman-upper")
+        lines = []
+        for i, it in enumerate(el.findall("list-item"), 1):
+            lab = it.findtext("label")
+            mark = f"{lab}" if lab else (f"{i}." if ordered else "-")
+            text = _md_esc(" ".join(self.inl(p) for p in it.findall("p")))
+            lines.append("  " * depth + f"{mark} {text}")
+            for sub in it.findall("list") + [x for p in it.findall("p") for x in p.findall("list")]:
+                lines += self.list_(sub, depth + 1)
+        return lines
+
+    def _graphic(self, el):
+        g = el.find(".//graphic")
+        if g is None:
+            return ""
+        href = g.get("href") or ""
+        key = os.path.splitext(os.path.basename(href))[0].lower()
+        return self.media.get(href.lower()) or self.media.get(key) or ""
+
+    def fig(self, f):
+        label = _md_esc(f.findtext("label") or "Figure")
+        cap = f.find("caption")
+        captxt = _md_esc(" ".join(self.inl(x) for x in cap)) if cap is not None else ""
+        path = self._graphic(f)
+        self.figures.append((label, path))
+        if path:
+            self.out.append(f"![{label}]({path})")
+        else:
+            self.out.append(f"*[{label} : image non fournie avec le texte]*")
+        self.out.append(f"**{label}.** {captxt}".strip())
+
+    def suppl(self, s):
+        label = _md_esc(s.findtext("label") or s.findtext("caption/title") or "Supplément")
+        href = ""
+        m = s.find(".//media")
+        if m is not None:
+            href = m.get("href") or ""
+        local = self.media.get(href.lower()) or self.media.get(os.path.splitext(href)[0].lower()) or ""
+        url = self.online.get(href.lower(), "")
+        cap = _md_esc(" ".join(self.inl(p) for p in s.findall("caption/p")))
+        link = (f" : [{os.path.basename(local)}]({local})" if local else
+                f" : [{href}]({url}) (en ligne, non téléchargé)" if url else
+                (f" : {href} (non téléchargé)" if href else ""))
+        self.out.append(f"- **{label}**" + link + (f" — {cap}" if cap else ""))
+
+    @staticmethod
+    def grid(table):
+        """<table> -> (grille [[texte]], lignes d'en-tête, fusion ?) ; les cellules fusionnées sont
+        répétées dans la grille (lecture machine), la version HTML garde la fusion."""
+        rows = []
+        head_rows = 0
+        for sect in ("thead", "tbody", "tfoot", None):
+            trs = table.findall(f"{sect}/tr") if sect else table.findall("tr")
+            if sect == "thead":
+                head_rows = len(trs)
+            rows += trs
+        grid, pending, merged = [], {}, False
+        for tr in rows:
+            line, col = [], 0
+            cells = [c for c in tr if c.tag in ("td", "th")]
+            ci = 0
+            while ci < len(cells) or col in pending:
+                if col in pending:
+                    txt, left = pending[col]
+                    line.append(txt)
+                    if left > 1:
+                        pending[col] = (txt, left - 1)
+                    else:
+                        del pending[col]
+                    col += 1
+                    continue
+                c = cells[ci]
+                ci += 1
+                txt = _md_esc("".join(c.itertext()))
+                cs = int(re.sub(r"\D", "", c.get("colspan") or "1") or 1)
+                rs = int(re.sub(r"\D", "", c.get("rowspan") or "1") or 1)
+                if cs > 1 or rs > 1:
+                    merged = True
+                for k in range(cs):
+                    line.append(txt)
+                    if rs > 1:
+                        pending[col] = (txt, rs - 1)
+                    col += 1
+            grid.append(line)
+        width = max((len(r) for r in grid), default=0)
+        grid = [r + [""] * (width - len(r)) for r in grid]
+        return grid, head_rows, merged
+
+    def table_html(self, table):
+        out = ["<table>"]
+        for tr in table.iter("tr"):
+            cells = []
+            for c in tr:
+                if c.tag not in ("td", "th"):
+                    continue
+                attrs = "".join(f' {k}="{c.get(k)}"' for k in ("colspan", "rowspan") if c.get(k) not in (None, "1"))
+                cells.append(f"<{c.tag}{attrs}>{htmlmod.escape(_md_esc(''.join(c.itertext())))}</{c.tag}>")
+            out.append("<tr>" + "".join(cells) + "</tr>")
+        out.append("</table>")
+        return "\n".join(out)
+
+    def table_wrap(self, tw):
+        label = _md_esc(tw.findtext("label") or f"Table {len(self.tables) + 1}")
+        cap = tw.find("caption")
+        captxt = _md_esc(" ".join(self.inl(x) for x in cap)) if cap is not None else ""
+        self.out.append(f"**{label}.** {captxt}".strip())
+        table = tw.find(".//table")
+        if table is None:
+            path = self._graphic(tw)
+            self.tables.append((label, "", None))
+            self.out.append((f"![{label}]({path})\n" if path else "")
+                            + "*Tableau fourni par l'éditeur sous forme d'image uniquement : contenu non "
+                              "disponible en texte.*")
+            return
+        grid, head_rows, merged = self.grid(table)
+        csv_name = re.sub(r"[^A-Za-z0-9]+", "_", label).strip("_") or f"Table_{len(self.tables) + 1}"
+        names = {n for _, n, _ in self.tables}
+        base, k = csv_name, 2
+        while csv_name + ".csv" in names:
+            csv_name = f"{base}_{k}"
+            k += 1
+        csv_name += ".csv"
+        self.tables.append((label, csv_name, grid))
+        if grid and not merged and head_rows <= 1:
+            w = len(grid[0])
+            lines = ["| " + " | ".join(_cell_md(x) for x in grid[0]) + " |", "|" + "---|" * w]
+            lines += ["| " + " | ".join(_cell_md(x) for x in r) + " |" for r in grid[1:]]
+            self.out.append("\n".join(lines))
+        elif grid:
+            self.out.append(self.table_html(table))
+        self.out.append(f"*Données : tableaux/{csv_name}*")
+        foot = tw.find("table-wrap-foot")
+        if foot is not None:
+            notes = [_md_esc(self.inl(x)) for x in foot.iter() if x.tag in ("p",)]
+            if notes:
+                self.out.append("*Notes : " + " ".join(notes) + "*")
+
+    # -- article ----------------------------------------------------------------------------- #
+    def render(self, meta_line=""):
+        r = self.root
+        am = r.find(".//article-meta")
+        title = _md_esc(self.inl(am.find("title-group/article-title"))) if am is not None and \
+            am.find("title-group/article-title") is not None else "(sans titre)"
+        self.out.append(f"# {title}")
+        if am is not None:
+            names = []
+            for c in am.findall("contrib-group/contrib"):
+                if (c.get("contrib-type") or "author") != "author":
+                    continue
+                sn, gn = c.findtext("name/surname") or "", c.findtext("name/given-names") or ""
+                coll = _md_esc("".join(c.find("collab").itertext())) if c.find("collab") is not None else ""
+                n = _md_esc(f"{gn} {sn}") or coll
+                if n:
+                    names.append(n)
+            if names:
+                self.out.append("**Auteurs :** " + ", ".join(names))
+        if meta_line:
+            self.out.append(meta_line)
+        lic = r.find(".//permissions/license")
+        if lic is not None:
+            href = lic.get("href") or ""
+            self.out.append("**Licence :** " + (_md_esc("".join(lic.itertext()))[:300] or href)
+                            + (f" ({href})" if href and href not in "".join(lic.itertext()) else ""))
+        if am is not None:
+            kws = [_md_esc("".join(k.itertext())) for k in am.findall("kwd-group/kwd")]
+            if kws:
+                self.out.append("**Mots-clés :** " + "; ".join(k for k in kws if k))
+            for ab in am.findall("abstract"):
+                kind = ab.get("abstract-type") or ""
+                self.out.append("## " + ("Abstract" if not kind else f"Abstract ({kind})"))
+                if ab.find("sec") is not None:
+                    self.blocks(ab, 3)
+                else:
+                    for p in ab.findall("p"):
+                        self.out.append(_md_esc(self.inl(p)))
+        body = r.find("body")
+        if body is not None:
+            self.blocks(body, 2)
+        back = r.find("back")
+        if back is not None:
+            self.blocks(back, 2)
+            refs = back.findall(".//ref-list/ref")
+            if refs:
+                self.out.append("## References")
+                for i, ref in enumerate(refs, 1):
+                    lab = ref.findtext("label") or str(i)
+                    cit = next((x for x in (ref.find("mixed-citation"), ref.find("element-citation"),
+                                            ref.find("citation")) if x is not None), ref)
+                    if cit.tag == "mixed-citation":
+                        txt = _md_esc(re.sub(r"\s+([.,;:])", r"\1", "".join(cit.itertext())))
+                    else:
+                        txt = _md_esc(", ".join(x.strip() for x in cit.itertext() if x.strip()))
+                    ids = [f"{p.get('pub-id-type')}: {p.text}" for p in cit.findall("pub-id") if p.text]
+                    self.out.append(f"{lab.strip('.').strip()}. {txt}" + (f" [{'; '.join(ids)}]" if ids and
+                                                                         not all(i.split(': ')[1] in txt for i in ids) else ""))
+        fg = r.find("floats-group")
+        if fg is not None:
+            self.blocks(fg, 2)
+        md = "\n\n".join(x for x in self.out if x and x.strip())
+        return re.sub(r"\n{3,}", "\n\n", md) + "\n"
+
+
+def _wrap(el):
+    w = ET.Element("wrap")
+    w.append(el)
+    return w
+
+
+def write_table_csv(path, grid):
+    import csv
+    with open(path, "w", encoding="utf-8-sig", newline="") as f:
+        csv.writer(f).writerows(grid)
+
+
+class JatsFetcher:
+    """XML JATS des articles PMC (Open Access et manuscrits d'auteurs) : PMC S3 (XML + figures +
+    suppléments), sinon Europe PMC (XML seul) ; puis Markdown + CSV des tableaux."""
+
+    def __init__(self, http, jats_dir, jats_dirname):
+        self.http = http
+        self.dir = jats_dir
+        self.dirname = jats_dirname
+        self.source_ok = Counter()
+        self.n_fig = 0
+        self.n_tab = 0
+        self.n_tab_img = 0
+
+    def _get(self, url, service, **kw):
+        try:
+            r = self.http.request("GET", url, service, **kw)
+        except requests.RequestException as e:
+            return None, f"erreur réseau : {type(e).__name__}"
+        if r.status_code != 200:
+            return None, f"HTTP {r.status_code}"
+        return r, ""
+
+    def s3_meta(self, a):
+        r, why = self._get(S3_BASE, "s3", params={"list-type": "2", "prefix": f"{a.pmcid}.", "delimiter": "/"})
+        if r is None:
+            return None, f"PMC S3 : listing {why}"
+        vers = re.findall(r"<Prefix>(%s\.(\d+))/</Prefix>" % re.escape(a.pmcid), r.text)
+        if not vers:
+            return None, "PMC S3 : absent du jeu PMC (hors Open Access / manuscrits d'auteurs)"
+        pfx = max(vers, key=lambda v: int(v[1]))[0]
+        m, why = self._get(f"{S3_BASE}{pfx}/{pfx}.json", "s3")
+        meta = {}
+        if m is not None:
+            try:
+                meta = m.json()
+            except ValueError:
+                meta = {}
+        meta.setdefault("xml_url", f"{S3_BASE}{pfx}/{pfx}.xml")
+        meta["_prefix"] = pfx
+        return meta, ""
+
+    def _download(self, url, dest, max_bytes=None):
+        try:
+            r = self.http.request("GET", url, "s3", stream=True)
+        except requests.RequestException:
+            return False
+        if r.status_code != 200:
+            r.close()
+            return False
+        size = int(r.headers.get("Content-Length") or 0)
+        if max_bytes and size > max_bytes:
+            r.close()
+            return False
+        tmp = dest + ".part"
+        n = 0
+        with open(tmp, "wb") as f:
+            for chunk in r.iter_content(65536):
+                n += len(chunk)
+                if max_bytes and n > max_bytes:
+                    f.close()
+                    os.remove(tmp)
+                    r.close()
+                    return False
+                f.write(chunk)
+        os.replace(tmp, dest)
+        return True
+
+    def process(self, a):
+        if not a.pmcid or STOP.is_set():
+            if not a.pmcid:
+                a.jats_note = "pas de PMCID : pas de XML JATS librement diffusé"
+            return a
+        base = a.pdf_filename()[:-4]
+        folder = os.path.join(self.dir, base)
+        xml, source, media, licence, notes = None, "", {}, "", []
+        meta, why = self.s3_meta(a)
+        if meta:
+            r, why2 = self._get(_s3_https(meta.get("xml_url")), "s3")
+            if r is not None:
+                xml, source = r.content, "PMC S3"
+                licence = meta.get("license_code") or ""
+            else:
+                notes.append(f"PMC S3 : XML {why2}")
+        else:
+            notes.append(why)
+        if xml is None:
+            url = f"{EPMC_REST}{a.pmcid}/fullTextXML"
+            r, why3 = self._get(url, "europepmc", retries=0)
+            if r is not None and r.content.strip().startswith(b"<"):
+                xml, source = r.content, "Europe PMC"
+            else:
+                notes.append(f"Europe PMC : {why3 or 'réponse vide'}")
+        if xml is None:
+            a.jats_note = " ; ".join(notes)
+            return a
+        try:
+            conv = JatsMarkdown(xml)
+        except ET.ParseError as e:
+            a.jats_note = f"{source} : XML illisible ({e})"
+            return a
+        os.makedirs(folder, exist_ok=True)
+        with open(os.path.join(folder, base + ".xml"), "wb") as f:
+            f.write(xml)
+        n_img = n_sup = 0
+        online = {}
+        if meta and source == "PMC S3":
+            for u in meta.get("media_urls") or []:
+                if STOP.is_set():
+                    break
+                url = _s3_https(u)
+                name = unquote(os.path.basename(urlparse(url).path))
+                if not name:
+                    continue
+                if not name.lower().endswith(JATS_IMG_EXT):
+                    # suppléments (tableurs, vidéos…) : lien en ligne seulement (volume souvent important)
+                    online[name.lower()] = url
+                    n_sup += 1
+                    continue
+                os.makedirs(os.path.join(folder, "figures"), exist_ok=True)
+                rel = f"figures/{name}"
+                if self._download(url, os.path.join(folder, "figures", name)):
+                    media[name.lower()] = rel
+                    media.setdefault(os.path.splitext(name)[0].lower(), rel)
+                    n_img += 1
+                else:
+                    notes.append(f"image non téléchargée : {name}")
+        elif source == "Europe PMC":
+            notes.append("Europe PMC fournit le XML sans les images : figures non téléchargées")
+        conv.media = media
+        conv.online = online
+        meta_line = " · ".join(x for x in (
+            a.journal, a.year, f"PMID {a.pmid}", a.pmcid, f"DOI {a.doi}" if a.doi else "",
+            f"source : {source}" + (f" (licence {licence})" if licence else "")) if x)
+        md = conv.render(f"*{meta_line}*")
+        with open(os.path.join(folder, base + ".md"), "w", encoding="utf-8") as f:
+            f.write(md)
+        nt = 0
+        for label, csv_name, grid in conv.tables:
+            if grid is None:
+                self.n_tab_img += 1
+                continue
+            os.makedirs(os.path.join(folder, "tableaux"), exist_ok=True)
+            write_table_csv(os.path.join(folder, "tableaux", csv_name), grid)
+            nt += 1
+        with self.http._lock:
+            self.source_ok[source] += 1
+            self.n_fig += n_img
+            self.n_tab += nt
+        a.jats_rel = f"{self.dirname}/{base}/{base}.md"
+        a.jats_source = source
+        a.jats_info = (f"XML + Markdown, {n_img} figure(s), {nt} tableau(x) CSV"
+                       + (f", {n_sup} supplément(s) en lien" if n_sup else "")
+                       + (f", {sum(1 for t in conv.tables if t[2] is None)} tableau(x) en image"
+                          if any(t[2] is None for t in conv.tables) else ""))
+        a.jats_note = " ; ".join(n for n in notes if not n.startswith(("PMC S3 : absent", "PMC S3 : listing")))
+        return a
+
+
+JATS_README = """Dossier « IA locale » — PubMed Search
+====================================
+
+Un sous-dossier par article (PMID-Auteur(Année)), avec :
+  • <article>.xml  : XML JATS d'origine (PMC / Europe PMC), complet et sans perte ;
+  • <article>.md   : le même article en Markdown (titres, texte, tableaux complets, légendes,
+                     formules, références) : le format à donner à une IA (modèle local, RAG…) ;
+  • tableaux/      : un fichier CSV par tableau (cellules fusionnées répétées), pour R, Excel, Python ;
+  • figures/       : les images des figures (référencées dans le Markdown).
+Les fichiers supplémentaires ne sont pas téléchargés (volume souvent important) : le Markdown
+donne leur lien PMC.
+
+Limites : seuls les articles présents dans PMC (sous-ensemble Open Access et manuscrits d'auteurs)
+ont un XML librement diffusé. Europe PMC fournit parfois le XML sans les figures. Les tableaux
+déposés en image par l'éditeur restent des images. Les graphiques sont des images : les valeurs
+exactes se trouvent dans les tableaux ou les suppléments quand les auteurs les ont publiées.
+"""
+
+
+# --------------------------------------------------------------------------- #
+# Mots-clés et termes MeSH équivalents (une ligne = des synonymes)
+# --------------------------------------------------------------------------- #
+MESH_LOOKUP = "https://id.nlm.nih.gov/mesh/lookup/descriptor"
+MESH_DETAILS = "https://id.nlm.nih.gov/mesh/lookup/details"
+
+
+def kw_norm(s):
+    s = unicodedata.normalize("NFKC", s or "").lower()
+    s = re.sub(r"[‐‑‒–—\-/_]+", " ", s)
+    s = re.sub(r"[\"'“”‘’«»*]", "", s)
+    s = re.sub(r"\s+", " ", s).strip(" .,;:")
+    return s
+
+
+def _valid_sf(sf):
+    if not 2 <= len(sf) <= 10 or len(sf.split()) > 2:
+        return False
+    if not re.search(r"[A-Za-z]", sf) or not sf[0].isalnum():
+        return False
+    if re.search(r"[=%;,<>±]", sf) or sf.lower() in ("ie", "eg", "i.e", "e.g", "vs", "ref", "refs"):
+        return False
+    if re.fullmatch(r"[a-z]+", sf) and len(sf) > 3:   # mot ordinaire entre parenthèses
+        return False
+    if re.fullmatch(r"\d+(\.\d+)?\s*[a-z]{0,3}", sf, re.I):   # « 12 h », « 3.5 mg »
+        return False
+    return True
+
+
+def _best_long_form(sf, cand):
+    """Algorithme de Schwartz & Hearst (2003) : la forme longue se termine juste avant la
+    parenthèse ; chaque caractère de l'abréviation y est retrouvé de droite à gauche, et le 1er
+    au début d'un mot."""
+    s, l = len(sf) - 1, len(cand) - 1
+    sfl, lfl = sf.lower(), cand.lower()
+    while s >= 0:
+        c = sfl[s]
+        if not c.isalnum():
+            s -= 1
+            continue
+        while (l >= 0 and lfl[l] != c) or (s == 0 and l > 0 and lfl[l - 1].isalnum()):
+            l -= 1
+        if l < 0:
+            return None
+        l -= 1
+        s -= 1
+    start = cand.rfind(" ", 0, l + 1) + 1
+    lf = cand[start:].strip(" ,;:-")
+    if len(lf) <= len(sf) or sf.lower() in lf.lower().split():
+        return None
+    return lf
+
+
+def find_abbreviations(text):
+    out = []
+    for m in re.finditer(r"\(([^()\[\]]{2,10})\)", text or ""):
+        sf = m.group(1).strip()
+        if not _valid_sf(sf):
+            continue
+        before = re.split(r"(?<=[.;:!?])\s|[\(\)\[\]]", text[:m.start()])[-1]
+        words = before.split()
+        maxw = min(len(sf) + 5, len(sf) * 2)
+        lf = _best_long_form(sf, " ".join(words[-maxw:]))
+        if lf and len(lf.split()) <= maxw:
+            out.append((sf, lf))
+    return out
+
+
+class _UF:
+    def __init__(self):
+        self.p = {}
+
+    def find(self, x):
+        self.p.setdefault(x, x)
+        while self.p[x] != x:
+            self.p[x] = self.p[self.p[x]]
+            x = self.p[x]
+        return x
+
+    def union(self, a, b):
+        ra, rb = self.find(a), self.find(b)
+        if ra != rb:
+            self.p[rb] = ra
+
+
+class KeywordGroups:
+    """Regroupe termes MeSH, mots-clés d'auteurs et abréviations en lignes de synonymes."""
+
+    def __init__(self, http, quiet=False):
+        self.http = http
+        self.uf = _UF()
+        self.display = {}           # clé normalisée -> Counter des graphies
+        self.arts = {}              # clé -> set(PMID) (ou d'indices de requête)
+        self.is_mesh = set()        # clés qui sont des descripteurs MeSH
+        self.mesh_ui = {}           # nom MeSH (clé) -> UI (D…)
+        self.entry_done = set()
+        self.ambiguous = {}         # abréviation -> [formes longues]
+        self.quiet = quiet
+        self.n_entry = 0
+        self.n_atm = 0
+        self.n_abbr = 0
+        self.n_fail = 0
+
+    def add(self, term, src_id, mesh=False, ui=""):
+        k = kw_norm(term)
+        if not k or len(k) < 2:
+            return ""
+        self.uf.find(k)
+        self.display.setdefault(k, Counter())[term.strip()] += 1
+        if src_id is not None:
+            self.arts.setdefault(k, set()).add(src_id)
+        else:
+            self.arts.setdefault(k, set())
+        if mesh:
+            self.is_mesh.add(k)
+            if ui:
+                self.mesh_ui[k] = ui
+        return k
+
+    # -- synonymes officiels du MeSH (entry terms) -------------------------------------------- #
+    def entry_terms(self, uis):
+        """esummary db=mesh (lots de 200) : DS_MeshTerms = descripteur + synonymes (entry terms)."""
+        uis = [u for u in dict.fromkeys(uis) if u and u not in self.entry_done and re.fullmatch(r"D\d+", u)]
+        for batch in chunks(uis, 200):
+            if STOP.is_set():
+                return
+            ids = ["68" + u[1:] for u in batch]
+            try:
+                r = self.http.request("POST", EUTILS + "esummary.fcgi", "ncbi",
+                                      data=self.http.ncbi(db="mesh", id=",".join(ids), retmode="json"))
+                r.raise_for_status()
+                res = r.json().get("result", {})
+            except Exception as e:  # noqa
+                self.n_fail += 1
+                log(f"  ⚠ MeSH (synonymes) : {short_err(e)}")
+                continue
+            rev = {}
+            for k, v in self.mesh_ui.items():
+                rev.setdefault(v, k)
+            for u, i in zip(batch, ids):
+                self.entry_done.add(u)
+                doc = res.get(i) or {}
+                terms = doc.get("ds_meshterms") or []
+                if not isinstance(terms, list) or not terms:
+                    continue
+                head = kw_norm(terms[0])
+                key = rev.get(u, head)
+                for t in terms:
+                    if ", " in t:          # formes permutées (« Traps, Extracellular »)
+                        continue
+                    k = self.add(t, None)
+                    if k:
+                        self.uf.union(key, k)
+                        self.n_entry += 1
+
+    def mesh_ui_by_name(self, name):
+        try:
+            r = self.http.request("GET", MESH_LOOKUP, "meshapi", retries=1,
+                                  params={"label": name, "match": "exact", "limit": 1})
+            j = r.json() if r.status_code == 200 else []
+        except Exception:  # noqa
+            self.n_fail += 1
+            return ""
+        if j and isinstance(j, list):
+            return str(j[0].get("resource", "")).rsplit("/", 1)[-1]
+        return ""
+
+    # -- correspondance automatique de PubMed (Automatic Term Mapping) ------------------------ #
+    def atm(self, term):
+        """MeSH auxquels PubMed rattache un terme libre (translationset d'ESearch)."""
+        try:
+            r = self.http.request("POST", EUTILS + "esearch.fcgi", "ncbi", retries=1,
+                                  data=self.http.ncbi(db="pubmed", term=term, retmax=0, retmode="json"))
+            r.raise_for_status()
+            ts = r.json().get("esearchresult", {}).get("translationset", []) or []
+        except Exception:  # noqa
+            self.n_fail += 1
+            return []
+        out = []
+        for t in ts:
+            for m in re.findall(r'"([^"]+)"\[MeSH Terms\]', t.get("to", "")):
+                if m not in out:
+                    out.append(m)
+        return out
+
+    def map_free_terms(self, keys, max_lookups):
+        done = 0
+        for k in keys:
+            if STOP.is_set() or done >= max_lookups:
+                break
+            disp = self.best(k)
+            # abréviations courtes : le mapping PubMed se trompe souvent (NLR -> NLR Proteins) ;
+            # elles sont rattachées par la détection dans les résumés
+            if re.fullmatch(r"[A-Z0-9\-]{2,6}s?", disp):
+                continue
+            done += 1
+            meshes = self.atm(disp)
+            if len(meshes) != 1:
+                continue
+            mk = self.add(meshes[0], None, mesh=True)
+            if mk and mk != k:
+                self.uf.union(mk, k)
+                self.n_atm += 1
+                if mk not in self.mesh_ui:
+                    ui = self.mesh_ui_by_name(meshes[0]) or self.mesh_ui_by_name(meshes[0].title())
+                    if ui:
+                        self.mesh_ui[mk] = ui
+            if done % 50 == 0 and not self.quiet:
+                log(f"  mots-clés : {done} rattachés au MeSH…")
+
+    def best(self, k):
+        c = self.display.get(k)
+        if not c:
+            return k
+        # graphie la plus fréquente ; à égalité, celle qui a des majuscules (sigles, noms propres)
+        return sorted(c.items(), key=lambda kv: (-kv[1], kv[0].islower(), kv[0]))[0][0]
+
+    def add_abbreviations(self, texts, keep_all_min=2):
+        """texts : [(id, texte)] ; paires (sigle, forme longue) gardées si vues ≥ keep_all_min fois
+        ou si l'un des deux termes est déjà un mot-clé ou un MeSH."""
+        pairs = Counter()
+        disp_lf = {}
+        where = {}
+        for sid, txt in texts:
+            for sf, lf in find_abbreviations(txt):
+                key = (sf, kw_norm(lf))
+                pairs[key] += 1
+                disp_lf.setdefault(key, Counter())[lf] += 1
+                where.setdefault(key, set()).add(sid)
+        by_sf = {}
+        for (sf, lfk), n in pairs.items():
+            if n >= keep_all_min or lfk in self.arts or kw_norm(sf) in self.arts:
+                by_sf.setdefault(sf, []).append((n, lfk))
+        def jacc(x, y):
+            a, b = set(x.split()), set(y.split())
+            return len(a & b) / max(1, len(a | b))
+        for sf, lst in by_sf.items():
+            lst.sort(reverse=True)
+            main = lst[0][1]
+            # variantes d'écriture d'un même sens (« neutrophil-to-lymphocyte » / « neutrophil
+            # lymphocyte ») : rattachées ; sens différents (NLR = NOD-like receptor) : seul le plus
+            # fréquent est rattaché au sigle, les autres sont signalés
+            variants = [lfk for _, lfk in lst if lfk == main or jacc(lfk, main) >= 0.5]
+            others = [lfk for _, lfk in lst if lfk not in variants]
+            for lfk in variants:
+                lf = disp_lf[(sf, lfk)].most_common(1)[0][0]
+                for sid in where[(sf, lfk)]:
+                    k_lf = self.add(lf, sid)
+                    k_sf = self.add(sf, sid)
+                if k_lf and k_sf:
+                    self.uf.union(k_sf, k_lf)
+                    self.n_abbr += 1
+            if others:
+                self.ambiguous[sf] = [disp_lf[(sf, g)].most_common(1)[0][0] for g in [main] + others[:3]]
+
+    def groups(self):
+        g = {}
+        for k in self.display:
+            g.setdefault(self.uf.find(k), []).append(k)
+        out = []
+        for keys in g.values():
+            ids = set()
+            for k in keys:
+                ids |= self.arts.get(k, set())
+            if not ids:
+                continue
+            keys.sort(key=lambda k: (-len(self.arts.get(k, ())), k not in self.is_mesh, k))
+            seen, terms = set(), []
+            for k in keys:
+                d = self.best(k)
+                if kw_norm(d) not in seen:
+                    seen.add(kw_norm(d))
+                    terms.append(d)
+            out.append((len(ids), terms, any(k in self.is_mesh for k in keys), keys))
+        out.sort(key=lambda x: (-x[0], x[1][0].lower()))
+        return out
+
+    def write(self, path, title_lines, n_items, unit="articles", sources=None):
+        groups = self.groups()
+        de_unit = ("d'" if unit[:1] in "aeiouéè" else "de ") + unit
+        with open(path, "w", encoding="utf-8") as f:
+            for t in title_lines:
+                f.write(f"# {t}\n")
+            f.write("# Une ligne = des termes équivalents séparés par « = » ; lignes triées par nombre "
+                    f"{de_unit} (sur {n_items}), le terme le plus employé en premier.\n")
+            f.write("# Sources : " + (sources or "descripteurs MeSH et leurs synonymes officiels (entry terms), "
+                    "mots-clés des auteurs, correspondance automatique de PubMed, sigles définis dans les "
+                    "titres et résumés (méthode de Schwartz & Hearst, 2003).") + "\n#\n")
+            for n, terms, _, _ in groups:
+                f.write(" = ".join(terms) + "\n")
+            if self.ambiguous:
+                f.write("#\n# Sigles à sens multiples (rattachés au sens le plus fréquent) :\n")
+                for sf, lfs in sorted(self.ambiguous.items()):
+                    f.write(f"#   {sf} : " + " | ".join(lfs) + "\n")
+        return groups
+
+
+def build_keywords(http, articles, path, query, max_lookups=150, offline=False):
+    kg = KeywordGroups(http)
+    for a in articles:
+        for ui, name in a.mesh:
+            kg.add(name, a.pmid, mesh=True, ui=ui)
+        for kw in a.keywords:
+            kg.add(kw, a.pmid)
+    n_terms = len(kg.display)
+    if not offline:
+        log(f"  • synonymes MeSH ({len(set(kg.mesh_ui.values()))} descripteurs)…")
+        kg.entry_terms(list(kg.mesh_ui.values()))
+        free = sorted((k for k in kg.display if k not in kg.is_mesh
+                       and kg.uf.find(k) == k and len(kg.arts.get(k, ())) >= 1),
+                      key=lambda k: -len(kg.arts.get(k, ())))
+        log(f"  • rattachement des mots-clés d'auteurs au MeSH (≤ {max_lookups} termes)…")
+        kg.map_free_terms(free, max_lookups)
+        kg.entry_terms(list(kg.mesh_ui.values()))
+    log("  • sigles définis dans les titres et résumés…")
+    kg.add_abbreviations([(a.pmid, f"{a.title} {a.abstract}") for a in articles])
+    groups = kg.write(path, [f"Mots-clés et termes MeSH — requête : {query}",
+                             f"{len(articles)} articles, {n_terms} termes distincts au départ"],
+                      len(articles))
+    log(f"  {len(groups)} ligne(s) de termes équivalents ({kg.n_entry} synonymes MeSH, {kg.n_atm} "
+        f"rattachements PubMed, {kg.n_abbr} sigles)")
+    if kg.n_fail:
+        log(f"  ⚠ {kg.n_fail} requête(s) MeSH/PubMed sans réponse : synonymes incomplets.")
+    return groups
+
+
+QUERY_SKIP_TAGS = ("pt", "dp", "la", "sb", "filter", "lang", "publication type", "date", "edat", "mhda",
+                   "crdt", "pdat", "sex", "ptyp", "jour", "ta", "au", "1au", "lastau", "pmid", "uid",
+                   "doi", "aid", "vi", "ip", "pg", "volume", "issue", "subset", "language", "mesh subheading", "sh")
+
+
+def query_terms(q):
+    """Termes d'une requête PubMed (sans opérateurs, filtres de date/type/langue ni étiquettes)."""
+    out = []
+    q = re.sub(r"\b(AND|OR|NOT)\b", "\x00", q)
+    for part in re.split(r"[\x00()]", q):
+        part = part.strip()
+        if not part:
+            continue
+        m = re.match(r'^(.*?)\s*\[([^\]]+)\]\s*$', part)
+        tag = ""
+        if m:
+            part, tag = m.group(1).strip(), m.group(2).strip().lower()
+            tag = re.sub(r":.*$", "", tag)
+        if tag in QUERY_SKIP_TAGS or re.fullmatch(r'"?\s*\d{4}([/\-:]\d{1,4})*\s*"?.*', part):
+            continue
+        term = part.strip('" ').rstrip("*").strip()
+        if len(term) < 2 or re.fullmatch(r"last \d+ (years?|days?|months?)", term, re.I):
+            continue
+        out.append((term, tag))
+    return out
+
+
+def run_query_keywords(args):
+    """--keywords-from-queries FICHIER : termes des requêtes d'une liste (une requête par ligne)."""
+    with open(args.keywords_from_queries, encoding="utf-8") as f:
+        queries = [ln.strip() for ln in f if ln.strip() and not ln.startswith("#")]
+    http = Http(args.email, args.api_key, sources=[])
+    kg = KeywordGroups(http, quiet=True)
+    log(f"Termes des requêtes : {len(queries)} requête(s)")
+    pending_ui = []
+    for qi, q in enumerate(queries, 1):
+        for term, tag in query_terms(q):
+            mesh = tag in ("mh", "mesh", "mesh terms", "majr", "mesh major topic", "mh:noexp")
+            k = kg.add(term, qi, mesh=mesh)
+            if not k:
+                continue
+            if mesh:
+                ui = kg.mesh_ui_by_name(term) or kg.mesh_ui_by_name(term.title())
+                if ui:
+                    kg.mesh_ui[k] = ui
+                    pending_ui.append(ui)
+            elif not re.fullmatch(r"[A-Z0-9\-]{2,6}s?", term):
+                for m in kg.atm(term)[:3]:
+                    mk = kg.add(m, qi, mesh=True)
+                    kg.uf.union(k, mk)
+                    kg.n_atm += 1
+                    ui = kg.mesh_ui_by_name(m.title()) or kg.mesh_ui_by_name(m)
+                    if ui:
+                        kg.mesh_ui[mk] = ui
+                        pending_ui.append(ui)
+        log(f"  [{qi}/{len(queries)}] {q[:90]}")
+    kg.entry_terms(pending_ui)
+    out = args.output or os.path.splitext(args.keywords_from_queries)[0] + "_mots-cles.txt"
+    label = os.path.basename(args.keywords_from_queries).replace(" (requêtes).txt", "")
+    groups = kg.write(out, [f"Termes des requêtes de la liste : {label}",
+                            f"{len(queries)} requête(s)"], len(queries), unit="requêtes",
+                      sources="termes des requêtes, correspondance automatique de PubMed vers le MeSH, "
+                              "synonymes officiels du MeSH (entry terms).")
+    if kg.n_fail:
+        log(f"⚠ {kg.n_fail} requête(s) MeSH/PubMed sans réponse : synonymes incomplets (réseau ?).")
+    log(f"{len(groups)} ligne(s) de termes équivalents → {out}")
+    log(f"KEYWORDS_FILE: {out}")
+    return 0
+
+
+# --------------------------------------------------------------------------- #
 # Sorties
 # --------------------------------------------------------------------------- #
-def write_excel(path, articles, summary_rows):
+def write_excel(path, articles, summary_rows, kw_groups=None):
     wb = Workbook()
     ws = wb.active
     ws.title = "Articles"
     headers = ["PMID", "DOI", "Titre de l'article", "Type d'article", "1er auteur",
                "Dernier auteur", "Autres auteurs", "Email (auteurs)", "Gratuit",
                "PDF (lien local)", "PMCID", "Année", "Journal", "Source du PDF", "Tri / rang",
-               "JSON (lien local)", "Source du JSON", "Contenu du JSON"]
+               "JSON (lien local)", "Source du JSON", "Contenu du JSON",
+               "IA locale : Markdown (lien local)", "Contenu JATS"]
     ws.append(headers)
     hfill = PatternFill("solid", fgColor="1F4E78")
     for c in ws[1]:
@@ -1703,7 +2666,8 @@ def write_excel(path, articles, summary_rows):
         row = [a.pmid, a.doi, a.title, "; ".join(a.pub_types), a.first_author, a.last_author,
                a.other_authors, a.emails, a.free, a.pdf_rel or "non téléchargé", a.pmcid,
                a.year, a.journal, a.pdf_source, a.sort_label,
-               a.json_rel or ("" if a.pdf_rel else "-"), a.json_source, a.json_level]
+               a.json_rel or ("" if a.pdf_rel else "-"), a.json_source, a.json_level,
+               a.jats_rel or (a.jats_note[:120] if a.jats_note else ""), a.jats_info]
         ws.append([clean_xl(v) for v in row])
         r = ws.max_row
         ws.cell(r, 1).hyperlink = f"https://pubmed.ncbi.nlm.nih.gov/{a.pmid}/"
@@ -1718,7 +2682,10 @@ def write_excel(path, articles, summary_rows):
         if a.json_rel:
             ws.cell(r, 16).hyperlink = a.json_rel
             ws.cell(r, 16).font = Font(color="0563C1", underline="single")
-    widths = [11, 26, 60, 24, 18, 18, 40, 40, 17, 42, 13, 7, 30, 22, 26, 42, 26, 16]
+        if a.jats_rel:
+            ws.cell(r, 19).hyperlink = a.jats_rel
+            ws.cell(r, 19).font = Font(color="0563C1", underline="single")
+    widths = [11, 26, 60, 24, 18, 18, 40, 40, 17, 42, 13, 7, 30, 22, 26, 42, 26, 16, 46, 40]
     for i, w in enumerate(widths, 1):
         ws.column_dimensions[get_column_letter(i)].width = w
     ws.freeze_panes = "A2"
@@ -1737,6 +2704,19 @@ def write_excel(path, articles, summary_rows):
     ws2.column_dimensions["B"].width = 100
     for row in ws2.iter_rows(min_row=2):
         row[1].alignment = Alignment(wrap_text=True, vertical="top")
+    if kw_groups:
+        ws3 = wb.create_sheet("Mots-clés")
+        ws3.append(["Termes équivalents", "Articles", "MeSH"])
+        for c in ws3[1]:
+            c.font = Font(bold=True, color="FFFFFF")
+            c.fill = hfill
+        for n, terms, is_mesh, _ in kw_groups:
+            ws3.append([clean_xl(" = ".join(terms)), n, "oui" if is_mesh else ""])
+        ws3.column_dimensions["A"].width = 110
+        ws3.column_dimensions["B"].width = 10
+        ws3.column_dimensions["C"].width = 8
+        ws3.freeze_panes = "A2"
+        ws3.auto_filter.ref = ws3.dimensions
     wb.save(path)
 
 
@@ -1808,7 +2788,21 @@ def advice(articles, http, getfree):
     return out
 
 
-def write_error_file(path, articles, meta_lines, getfree, tips=()):
+def _write_jats_section(f, articles):
+    pmc = [a for a in articles if a.pmcid]
+    miss = [a for a in pmc if not a.jats_rel]
+    part = [a for a in pmc if a.jats_rel and a.jats_note]
+    f.write("\n" + "-" * 78 + "\nPASSE XML JATS (IA locale)\n" + "-" * 78 + "\n")
+    f.write(f"Articles avec PMCID : {len(pmc)} | XML obtenus : {len(pmc) - len(miss)} | "
+            f"sans XML : {len(miss)} | sans PMCID (pas de XML libre) : "
+            f"{sum(1 for a in articles if not a.pmcid)}\n")
+    for a in miss:
+        f.write(f"  PMID {a.pmid} | {a.pmcid} : {a.jats_note or 'non traité (arrêt)'}\n")
+    for a in part:
+        f.write(f"  PMID {a.pmid} | {a.pmcid} (obtenu) : {a.jats_note}\n")
+
+
+def write_error_file(path, articles, meta_lines, getfree, tips=(), getjats=False):
     failed = [a for a in articles if not a.pdf_rel and a.free_like]
     other = [a for a in articles if not a.pdf_rel and not a.free_like]
     cats = Counter()
@@ -1824,7 +2818,9 @@ def write_error_file(path, articles, meta_lines, getfree, tips=()):
             f.write(line + "\n")
         f.write("\n")
         if not getfree:
-            f.write("Option --getfreepaper non activée : aucun téléchargement tenté.\n")
+            f.write("Option --getfreepaper non activée : aucun téléchargement de PDF tenté.\n")
+            if getjats:
+                _write_jats_section(f, articles)
             return
         f.write(f"Articles gratuits/OA non téléchargés : {len(failed)}\n")
         f.write(f"Articles sans mention de gratuité ni version OA détectée, non téléchargés : "
@@ -1868,6 +2864,8 @@ def write_error_file(path, articles, meta_lines, getfree, tips=()):
                 f.write(f"\nPMID {a.pmid} | DOI {a.doi or '-'} | PMCID {a.pmcid or '-'} → {res}\n")
                 for src, url, why in a.json_attempts:
                     f.write(f"  [JSON] {src} : {why}" + (f"\n             URL : {url}" if url else "") + "\n")
+        if getjats:
+            _write_jats_section(f, articles)
 
 
 # --------------------------------------------------------------------------- #
@@ -2771,6 +3769,16 @@ def build_parser():
     p.add_argument("--getjson", action="store_true",
                    help="passe JSON : texte intégral structuré (BioC PMC, Europe PMC, Springer Nature, "
                         "Elsevier) pour les articles restés sans PDF")
+    p.add_argument("--getjats", action="store_true",
+                   help="passe XML JATS pour tous les articles PMC : dossier JATS_<nom>/ pour une IA locale "
+                        "(XML d'origine, Markdown, un CSV par tableau, figures ; suppléments en lien)")
+    p.add_argument("--no-keywords", action="store_true",
+                   help="ne pas créer <nom>_mots-cles.txt (mots-clés et MeSH regroupés en synonymes)")
+    p.add_argument("--keywords-max-lookups", type=int, default=150,
+                   help="mots-clés d'auteurs rattachés au MeSH par PubMed (1 requête chacun ; défaut 150)")
+    p.add_argument("--keywords-from-queries", metavar="FICHIER",
+                   help="mode liste : termes des requêtes de FICHIER (une par ligne) regroupés en synonymes "
+                        "dans --output (défaut : FICHIER_mots-cles.txt)")
     p.add_argument("--sources", type=parse_sources, default=None,
                    help="sources optionnelles à utiliser, séparées par des virgules, parmi : "
                         + ", ".join(OPTIONAL_SOURCES) + " (défaut : toutes ; 'none' = aucune). "
@@ -2837,6 +3845,8 @@ def main():
         argv = [x for x in argv if x != "--"]
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.keywords_from_queries:
+        return run_query_keywords(args)
     if args.import_pdf:
         if not args.results:
             parser.error("--import-pdf nécessite --results DOSSIER_RESULTATS")
@@ -2881,6 +3891,12 @@ def main():
     json_dir = os.path.join(folder, json_dirname)
     if args.getjson:
         os.makedirs(json_dir, exist_ok=True)
+    jats_dirname = f"JATS_{stem}"
+    jats_dir = os.path.join(folder, jats_dirname)
+    if args.getjats:
+        os.makedirs(jats_dir, exist_ok=True)
+        with open(os.path.join(jats_dir, "LISEZMOI.txt"), "w", encoding="utf-8") as f:
+            f.write(JATS_README)
 
     http = Http(args.email, args.api_key, args.openalex_key, args.timeout, args.elsevier_key,
                 args.core_key, args.springer_oa_key, args.springer_meta_key, args.sources)
@@ -2943,8 +3959,9 @@ def main():
     passes_done = 0
     dl = None
     jf = None
+    jx = None
     interrupted = False
-    if (args.getfreepaper or args.getjson) and articles:
+    if (args.getfreepaper or args.getjson or args.getjats) and articles:
         try:
             log("🔗 Enrichissement des identifiants et des liens (ID converter PMC, Europe PMC, "
                 "LinkOut" + (", OpenAlex" if args.openalex_key else "") + ")…")
@@ -3009,10 +4026,42 @@ def main():
                         status = f"JSON {a.json_level} ({a.json_source})" if a.json_rel else "pas de JSON"
                         log(f"  [{i}/{n}] PMID {a.pmid} [{a.free}] ⇒ {status}")
                 log(f"  Fin de la passe JSON : {sum(1 for a in articles if a.json_rel)} JSON")
+            if args.getjats and not STOP.is_set():
+                jx = JatsFetcher(http, jats_dir, jats_dirname)
+                targets = [a for a in articles if a.pmcid]
+                log(f"\n🧬 Passe XML JATS (IA locale) : {len(targets)} article(s) PMC "
+                    f"({sum(1 for a in articles if not a.pmcid)} sans PMCID, pas de XML libre)")
+                n = len(targets)
+                with ThreadPoolExecutor(max_workers=max(1, args.workers)) as ex:
+                    futs = {ex.submit(jx.process, a): a for a in targets}
+                    for i, fut in enumerate(as_completed(futs), 1):
+                        a = futs[fut]
+                        try:
+                            fut.result()
+                        except Exception as e:  # noqa
+                            a.jats_note = f"exception : {type(e).__name__}: {e}"
+                        status = f"XML ({a.jats_source}) : {a.jats_info}" if a.jats_rel else \
+                            f"pas de XML ({(a.jats_note or '')[:90]})"
+                        log(f"  [{i}/{n}] PMID {a.pmid} ◆ {status}")
+                log(f"  Fin de la passe XML JATS : {sum(1 for a in articles if a.jats_rel)} article(s), "
+                    f"{jx.n_fig} figure(s), {jx.n_tab} tableau(x) CSV")
         except KeyboardInterrupt:
             STOP.set()
             interrupted = True
             log("\n⛔ Interruption : écriture des résultats partiels…")
+
+    kw_groups = None
+    kw_path = os.path.join(folder, f"{stem}_mots-cles.txt")
+    if articles and not args.no_keywords:
+        log("\n🏷 Mots-clés et termes MeSH équivalents" + (" (sans requête réseau : arrêt demandé)"
+                                                          if interrupted or STOP.is_set() else "") + "…")
+        try:
+            kw_groups = build_keywords(http, articles, kw_path, args.query, args.keywords_max_lookups,
+                                       offline=interrupted or STOP.is_set())
+        except KeyboardInterrupt:
+            interrupted = True
+        except Exception as e:  # noqa
+            log(f"  ⚠ Mots-clés : {type(e).__name__} : {e}")
 
     # ---------------- statistiques et sorties ---------------- #
     elapsed = time.monotonic() - t0
@@ -3032,6 +4081,8 @@ def main():
         f.write(",".join(a.pmid for a in articles if not a.pdf_rel))
     n_json = sum(1 for a in articles if a.json_rel)
     n_json_ft = sum(1 for a in articles if a.json_level == "texte intégral")
+    n_jats = sum(1 for a in articles if a.jats_rel)
+    n_pmc = sum(1 for a in articles if a.pmcid)
     if args.getjson:
         with open(os.path.join(folder, f"{stem}_PMID_json.txt"), "w", encoding="utf-8") as f:
             f.write(",".join(a.pmid for a in articles if a.json_rel))
@@ -3072,6 +4123,12 @@ def main():
         ("  dont résumé seulement", (n_json - n_json_ft) if args.getjson else "-"),
         ("JSON par source", ", ".join(f"{k}: {v}" for k, v in jf.source_ok.most_common()) if jf else "-"),
         ("PDF ou JSON texte intégral / tous les articles", pct(n_pdf + n_json_ft, n)),
+        ("Passe XML JATS demandée (--getjats)", "oui" if args.getjats else "non"),
+        ("XML JATS obtenus / articles PMC", f"{n_jats} / {n_pmc}" if args.getjats else "-"),
+        ("XML JATS par source", ", ".join(f"{k}: {v}" for k, v in jx.source_ok.most_common()) if jx else "-"),
+        ("Figures et tableaux CSV (IA locale)", f"{jx.n_fig} figure(s), {jx.n_tab} tableau(x), "
+                                                f"{jx.n_tab_img} tableau(x) en image" if jx else "-"),
+        ("Lignes de mots-clés équivalents", len(kw_groups) if kw_groups else "-"),
         ("Sources optionnelles actives", ", ".join(x for x in OPTIONAL_SOURCES if http.use(x)) or "aucune"),
         ("Durée", fmt_duration(elapsed)),
         ("Requêtes HTTP (total)", http.total),
@@ -3088,13 +4145,14 @@ def main():
         ("Interrompu", "oui" if interrupted else "non"),
     ]
     xlsx_path = os.path.join(folder, os.path.basename(args.output))
-    write_excel(xlsx_path, articles, summary)
+    write_excel(xlsx_path, articles, summary, kw_groups)
     meta = [f"Date : {run_dt:%d/%m/%Y %Hh%M}", f"Requête : {args.query}",
             f"Commande : {masked_argv()}", f"Version script : {VERSION} | Python {sys.version.split()[0]}"
             f" | requests {requests.__version__}",
             f"Passes : {passes_done} | PDF : {n_pdf}/{n} | Requêtes : {http.total} ({req_detail})"]
     tips = advice(articles, http, args.getfreepaper)
-    write_error_file(os.path.join(folder, "error.txt"), articles, meta, args.getfreepaper or args.getjson, tips)
+    write_error_file(os.path.join(folder, "error.txt"), articles, meta, args.getfreepaper or args.getjson, tips,
+                     getjats=args.getjats)
 
     log("\n" + "=" * 60)
     log("📈 STATISTIQUES")
@@ -3117,6 +4175,11 @@ def main():
             f"résumé : {n_json - n_json_ft})")
         log(f"  JSON par source                : "
             f"{', '.join(f'{k}: {v}' for k, v in jf.source_ok.most_common()) if jf else '-'}")
+    if args.getjats:
+        log(f"  XML JATS (IA locale)           : {n_jats} / {n_pmc} articles PMC"
+            + (f"  ({jx.n_fig} figures, {jx.n_tab} tableaux CSV)" if jx else ""))
+    if kw_groups:
+        log(f"  Mots-clés équivalents          : {len(kw_groups)} ligne(s) → {stem}_mots-cles.txt")
     for t in tips:
         log(f"  💡 {t}")
     log(f"  Durée                          : {fmt_duration(elapsed)}")
@@ -3127,7 +4190,9 @@ def main():
             for k in sorted({k for k, _ in http.paused_log})))
     log(f"\n  Excel : {xlsx_path}")
     log(f"  Fichiers : {stem}_PMID_tous.txt, {stem}_PMID_sans_pdf.txt"
-        + (f", {stem}_PMID_json.txt" if args.getjson else "") + ", error.txt")
+        + (f", {stem}_PMID_json.txt" if args.getjson else "")
+        + (f", {stem}_mots-cles.txt" if kw_groups else "") + ", error.txt"
+        + (f", {jats_dirname}/" if args.getjats else ""))
     return 0
 
 

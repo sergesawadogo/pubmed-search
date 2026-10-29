@@ -8,10 +8,10 @@ avec le Python intégré à l'application. Rien d'autre à installer pour l'util
 
 | Système | Fichier | Installation |
 |---|---|---|
-| Ubuntu / Debian | `pubmed-search-gui_1.8.2_amd64.deb` | `sudo apt install ./pubmed-search-gui_1.8.2_amd64.deb` |
-| Windows 10 / 11 (64 bits) | `PubMedSearch-Setup-1.8.2.exe` | double-clic (droits administrateur) |
-| macOS 12+ Apple Silicon (M1…M4) | `PubMedSearch-1.8.2-macOS-AppleSilicon.dmg` | ouvrir le .dmg, glisser l'app dans Applications |
-| macOS 12+ Intel | `PubMedSearch-1.8.2-macOS-Intel.dmg` | idem |
+| Ubuntu / Debian | `pubmed-search-gui_1.9.0_amd64.deb` | `sudo apt install ./pubmed-search-gui_1.9.0_amd64.deb` |
+| Windows 10 / 11 (64 bits) | `PubMedSearch-Setup-1.9.0.exe` | double-clic (droits administrateur) |
+| macOS 12+ Apple Silicon (M1…M4) | `PubMedSearch-1.9.0-macOS-AppleSilicon.dmg` | ouvrir le .dmg, glisser l'app dans Applications |
+| macOS 12+ Intel | `PubMedSearch-1.9.0-macOS-Intel.dmg` | idem |
 
 L'installateur Windows n'est pas signé numériquement : au premier lancement, Windows
 SmartScreen affiche « Windows a protégé votre ordinateur » → *Informations complémentaires*
@@ -55,6 +55,10 @@ installées automatiquement par `apt` comme dépendances.
   QPdfWriter, polices intégrées), PDF téléchargés ajoutés, regroupement en lots (pypdf) sous la
   limite de sources ; option automatique en fin de recherche ; conversion des recherches
   déjà faites, une par une ou par lot (dossier contenant plusieurs recherches).
+- **Recherche → Préparer aussi pour une IA locale (XML JATS)** (`--getjats`) : dossier JATS_… par
+  article PMC (XML, Markdown, CSV par tableau, figures).
+- **Mots-clés** : `<nom>_mots-cles.txt` à chaque recherche (MeSH, synonymes, mots-clés d'auteurs,
+  sigles) ; **File d'attente → Mots-clés des requêtes** (`--keywords-from-queries`) pour une liste.
 - **Partager** : archive zip du dossier de résultats (contenu au choix), découpage en archives
   autonomes sous la limite par mail ou lien SwissTransfer, message ouvert dans Thunderbird ou
   Outlook avec la pièce jointe.
@@ -89,11 +93,11 @@ Si une nouvelle version du script importe une bibliothèque absente du Python in
 
 **Linux (.deb)** : `./packaging/linux/build_deb.sh` → `dist/pubmed-search-gui_<version>_amd64.deb`
 
-**Windows (.exe) depuis Linux** (méthode utilisée pour la 1.8.2) : Python Windows
+**Windows (.exe) depuis Linux** (méthode utilisée pour la 1.9.0) : Python Windows
 (python-build-standalone, `uv python install cpython-3.11-windows-x86_64-none`) exécuté sous
 Wine pour PyInstaller (`wine python.exe -m PyInstaller --workpath build-win --distpath dist-win
 pubmed_gui.spec`, sortie redirigée par un tube `| cat`), puis
-`makensis -DVERSION=1.8.2 -DSRCDIR=../../dist-win/PubMedSearch packaging/windows/installer.nsi`
+`makensis -DVERSION=1.9.0 -DSRCDIR=../../dist-win/PubMedSearch packaging/windows/installer.nsi`
 (NSIS, installateur 64 bits pour Windows 10/11).
 
 **Windows (.exe)**, sur un PC Windows avec Python 3.10+ :

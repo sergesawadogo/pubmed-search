@@ -13,10 +13,10 @@ Page des téléchargements : **[Dernière version](https://github.com/sergesawad
 
 | Fichier | Pour |
 |---|---|
-| `PubMedSearch-Setup-1.8.2.exe` | Windows 10 et 11 (64 bits) |
-| `PubMedSearch-1.8.2-macOS-AppleSilicon.dmg` | Mac à puce Apple (M1, M2, M3, M4…), macOS 12 Monterey ou plus récent |
-| `PubMedSearch-1.8.2-macOS-Intel.dmg` | Mac à processeur Intel, macOS 12 Monterey ou plus récent |
-| `pubmed-search-gui_1.8.2_amd64.deb` | Ubuntu 20.04+, Debian 10+, Linux Mint 20+ (64 bits) |
+| `PubMedSearch-Setup-1.9.0.exe` | Windows 10 et 11 (64 bits) |
+| `PubMedSearch-1.9.0-macOS-AppleSilicon.dmg` | Mac à puce Apple (M1, M2, M3, M4…), macOS 12 Monterey ou plus récent |
+| `PubMedSearch-1.9.0-macOS-Intel.dmg` | Mac à processeur Intel, macOS 12 Monterey ou plus récent |
+| `pubmed-search-gui_1.9.0_amd64.deb` | Ubuntu 20.04+, Debian 10+, Linux Mint 20+ (64 bits) |
 | `envoyer-vers-pubmed-search-1.0.0.xpi` | Extension Firefox (facultative) |
 | `SHA256SUMS.txt`, `SHA256SUMS-macOS.txt` | Empreintes pour vérifier les fichiers |
 
@@ -28,7 +28,7 @@ Rien d'autre à installer : Python et ses bibliothèques sont inclus dans l'appl
 
 ### Windows 10 / 11
 
-1. Téléchargez `PubMedSearch-Setup-1.8.2.exe` et double-cliquez dessus.
+1. Téléchargez `PubMedSearch-Setup-1.9.0.exe` et double-cliquez dessus.
 2. Windows affiche « Windows a protégé votre ordinateur » : l'installateur n'est pas signé
    numériquement. Cliquez sur **Informations complémentaires**, puis **Exécuter quand même**.
 3. Acceptez la demande d'autorisation administrateur, choisissez le dossier, terminez.
@@ -59,7 +59,7 @@ Vos réglages (`~/Library/Preferences/pubmed-search-gui`) sont conservés.
 
 ```bash
 cd ~/Téléchargements
-sudo apt install ./pubmed-search-gui_1.8.2_amd64.deb
+sudo apt install ./pubmed-search-gui_1.9.0_amd64.deb
 ```
 
 `apt` installe aussi les bibliothèques graphiques nécessaires. Lancez **PubMed Search**
@@ -306,6 +306,46 @@ version. Le champ accepte :
 
 Les fichiers JSON d'origine ne sont jamais modifiés. Les auteurs sont lus dans l'Excel de la
 recherche : si l'Excel n'est pas à côté, les PDF sont créés sans la liste des auteurs.
+
+### Préparer une recherche pour une IA locale (XML JATS)
+
+Cochez **Préparer aussi pour une IA locale (XML JATS)** dans l'onglet Recherche. Pour chaque
+article présent dans PMC (sous-ensemble Open Access et manuscrits d'auteurs), le dossier
+`JATS_<nom>/PMID-Auteur(Année)/` contient :
+
+- `….xml` : le XML JATS d'origine, complet (format d'archivage de PMC) ;
+- `….md` : l'article en Markdown, le format à donner à une IA : titres, texte, **tableaux
+  complets** (en HTML quand des cellules sont fusionnées), légendes des figures avec lien vers
+  l'image, formules (LaTeX, ou MathML quand l'éditeur ne fournit pas de LaTeX), références ;
+- `tableaux/` : un fichier CSV par tableau (cellules fusionnées répétées), pour R, Excel ou Python ;
+- `figures/` : les images des figures. Les fichiers supplémentaires ne sont pas téléchargés
+  (volume souvent important) : le Markdown donne leur lien PMC.
+
+Source : PMC Cloud Service (S3), sinon Europe PMC (XML seul, sans images). L'Excel des résultats
+indique pour chaque article le lien vers le Markdown et son contenu ; error.txt liste les articles
+sans XML et pourquoi. Limites : un article absent de PMC n'a pas de XML librement diffusé ; un
+tableau déposé en image par l'éditeur reste une image ; un graphique reste une image (les valeurs
+exactes sont dans les tableaux ou les suppléments quand les auteurs les ont publiées).
+
+### Mots-clés et termes MeSH équivalents
+
+Chaque recherche crée `<nom>_mots-cles.txt` (et l'onglet **Mots-clés** de l'Excel) : une ligne
+par groupe de termes équivalents, le plus employé en premier, lignes triées par nombre d'articles.
+
+```
+Extracellular Traps = NETosis = NETs = Neutrophil Extracellular Traps
+neutrophil-to-lymphocyte ratio = NLR
+```
+
+Les équivalences viennent des descripteurs MeSH des articles et de leurs synonymes officiels
+(*entry terms*), des mots-clés des auteurs rattachés au MeSH par la correspondance automatique de
+PubMed, et des sigles définis dans les titres et résumés (« neutrophil-to-lymphocyte ratio (NLR) »,
+méthode de Schwartz & Hearst, 2003). Un sigle à plusieurs sens (NLR = NOD-like receptor) est
+rattaché au sens le plus fréquent et signalé en fin de fichier.
+
+Pour une **liste de recherches** : onglet File d'attente → **Mots-clés des requêtes** crée le
+même fichier pour les termes des requêtes de la file, à côté de la liste Excel importée
+(`<liste>_mots-cles.txt`).
 
 ### Partager une recherche avec un collègue
 

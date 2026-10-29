@@ -20,7 +20,7 @@ import threading
 
 APP_NAME = "PubMed Search"
 APP_ID = "pubmed-search-gui"
-APP_VERSION = "1.8.2"
+APP_VERSION = "1.9.0"
 
 
 # --------------------------------------------------------------------------- #
@@ -875,7 +875,9 @@ def write_queue_template(path, groups, max_default=100, outdir_default=""):
          "cases d'un même volet sont combinées par OR, les volets et la requête par AND. La colonne ALL "
          "d'un volet coche tout le volet. Survolez l'intitulé d'une colonne pour voir les termes.", False),
         ("5. Colonnes laissées vides : valeurs de l'onglet Recherche au moment de l'import (tri, nombre "
-         "d'articles, passes, dossier). Télécharger les PDF : Oui par défaut ; JSON : Non par défaut.", False),
+         "d'articles, passes, dossier). Télécharger les PDF : Oui par défaut ; JSON : Non par défaut. Les "
+         "options « Gemini Notebook » et « IA locale (XML JATS) » sont celles cochées dans l'onglet "
+         "Recherche au moment de l'import.", False),
         ("6. La ligne grise d'exemple est ignorée tant que son nom commence par « Exemple_ ».", False),
         ("7. Enregistrez, puis dans l'onglet File d'attente : « Importer une liste (Excel)… ». Les "
          "recherches s'ajoutent à la file ; vérifiez-les puis cliquez sur « Lancer la file ».", False),
@@ -984,6 +986,8 @@ def read_queue_excel(path, groups, defaults):
             continue
         jobs.append({"stem": stem, "query": query, "base_query": base, "filters": labels,
                      "outdir": outdir, "max": mx, "sort": sort, "getpdf": getpdf, "getjson": getjson,
+                     "json2pdf": getjson and defaults.get("json2pdf", False),
+                     "getjats": defaults.get("getjats", False),
                      "sources": defaults.get("sources"), "passes": passes, "status": "attente",
                      "summary": ""})
     return jobs, problems
@@ -1042,6 +1046,7 @@ SHARE_KINDS = (
     ("excel", "Fichier(s) Excel des résultats"),
     ("pdf", "PDF des articles"),
     ("json", "Textes intégraux JSON"),
+    ("jats", "Dossier IA locale (XML JATS, Markdown, CSV, figures)"),
     ("reports", "error.txt, listes de PMID et notes"),
     ("word", "Bibliographie Word"),
     ("other", "Autres fichiers"),
@@ -1060,7 +1065,9 @@ def scan_results(folder):
             rel = os.path.relpath(full, folder)
             low = f.lower()
             top = rel.replace("\\", "/").split("/")[0]
-            if low.endswith(".pdf"):
+            if top.startswith("JATS_"):
+                k = "jats"
+            elif low.endswith(".pdf"):
                 k = "pdf"
             elif low.endswith(".json") and top.startswith("JSON_"):
                 k = "json"
@@ -1092,8 +1099,8 @@ def plan_parts(files, limit):
     """Répartit [(chemin, taille, type)] en archives autonomes de taille <= limit (octets) :
     fichiers non-PDF d'abord (dans la 1re), puis PDF du plus gros au plus petit (first-fit).
     Un fichier plus gros que la limite occupe seul une archive."""
-    small = [f for f in files if f[2] not in ("pdf", "json")]
-    big = sorted((f for f in files if f[2] in ("pdf", "json")), key=lambda f: -f[1])
+    small = [f for f in files if f[2] not in ("pdf", "json", "jats")]
+    big = sorted((f for f in files if f[2] in ("pdf", "json", "jats")), key=lambda f: -f[1])
     parts, sizes = [list(small)], [sum(f[1] for f in small)]
     for f in big:
         for i, sz in enumerate(sizes):
@@ -2069,6 +2076,12 @@ class MainWindow(QMainWindow):
         self.json2pdf.setEnabled(False)
         self.getjson.toggled.connect(lambda on: self.json2pdf.setEnabled(on))
         lay.addWidget(self.json2pdf)
+        self.getjats = QCheckBox("Préparer aussi pour une IA locale (XML JATS)")
+        self.getjats.setToolTip("Pour chaque article présent dans PMC : dossier JATS_… avec le XML JATS "
+                                "d'origine, un Markdown lisible par une IA (texte, tableaux complets, "
+                                "légendes, formules, références), un CSV par tableau, les images des figures "
+                                "(les suppléments restent en lien). Indépendant des PDF et des JSON.")
+        lay.addWidget(self.getjats)
         lay.addSpacing(8)
 
         # Sources optionnelles (menu déroulant à cases)
@@ -2487,9 +2500,21 @@ class MainWindow(QMainWindow):
                                "sans rien télécharger, et enregistre un Excel d'évaluation")
         self.q_eval.clicked.connect(self._queue_evaluate)
         irow.addWidget(self.q_eval)
+        self.q_kw = QPushButton("Mots-clés des requêtes")
+        self.q_kw.setObjectName("secondary")
+        self.q_kw.setToolTip("Fichier texte des termes des requêtes de la file, regroupés en équivalents "
+                             "(une ligne = des synonymes MeSH et PubMed), enregistré à côté de la liste Excel")
+        self.q_kw.clicked.connect(self._queue_keywords)
         irow.addStretch(1)
+        irow2 = QHBoxLayout()
+        irow2.setSpacing(6)
+        irow.removeWidget(self.q_eval)
+        irow2.addWidget(self.q_eval)
+        irow2.addWidget(self.q_kw)
+        irow2.addStretch(1)
         lay.addSpacing(6)
         lay.addLayout(irow)
+        lay.addLayout(irow2)
         lay.addSpacing(12)
         self.qtable = QTableWidget(0, 6)
         self.qtable.setObjectName("queue")
@@ -2746,7 +2771,9 @@ class MainWindow(QMainWindow):
         defaults = {"max": self.max_results.value(), "passes": self.passes.value(),
                     "sort": self._sort_key(), "outdir": self.outdir.text().strip(),
                     "sources": self._selected_sources() if self.sources_sec.isEnabled() else None,
-                    "json_ok": self.getjson.isEnabled()}
+                    "json_ok": self.getjson.isEnabled(),
+                    "json2pdf": self.json2pdf.isChecked() and self.json2pdf.isEnabled(),
+                    "getjats": self.getjats.isChecked() and self.getjats.isEnabled()}
         try:
             jobs, problems = read_queue_excel(path, self.filter_groups, defaults)
         except Exception as e:  # noqa
@@ -2772,6 +2799,67 @@ class MainWindow(QMainWindow):
             box.setDetailedText("\n".join(problems))
             box.setInformativeText("\n".join(problems[:8]) + ("\n…" if len(problems) > 8 else ""))
             box.exec()
+
+    def _queue_keywords(self):
+        script = self._script_ok()
+        if not script or not self._check_email():
+            return
+        jobs = [j for j in self.queue if j.get("query")]
+        if not jobs:
+            self.q_status.setText("La file est vide : importez une liste ou ajoutez des recherches.")
+            return
+        srcs = {j.get("source") for j in jobs if j.get("source")}
+        if len(srcs) == 1:
+            src = srcs.pop()
+            out = os.path.splitext(src)[0] + "_mots-cles.txt"
+        else:
+            start = os.path.join(self.outdir.text().strip() or os.path.expanduser("~"), "file_mots-cles.txt")
+            out, _ = QFileDialog.getSaveFileName(self, "Enregistrer les mots-clés des requêtes", start,
+                                                 "Texte (*.txt)")
+            if not out:
+                return
+        name = os.path.splitext(os.path.basename(out))[0]
+        name = name[:-len("_mots-cles")] if name.endswith("_mots-cles") else name
+        tmpd = os.path.join(QStandardPaths.writableLocation(QStandardPaths.TempLocation) or
+                            os.path.dirname(out), f"pubmed_search_{os.getpid()}")
+        os.makedirs(tmpd, exist_ok=True)
+        tmp = os.path.join(tmpd, name + ".xlsx (requêtes).txt")
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write("\n".join(" ".join(j["query"].split()) for j in jobs) + "\n")
+        prog, full = self._python_cmd(script, ["--keywords-from-queries", tmp, "--output", out,
+                                               "--email", self.email.text().strip()])
+        proc = QProcess(self)
+        proc.setProcessChannelMode(QProcess.MergedChannels)
+        proc.setProcessEnvironment(self._env())
+        proc.setWorkingDirectory(os.path.dirname(script))
+        self._kw_proc = proc
+        self.q_kw.setEnabled(False)
+        self.q_status.setText(f"Mots-clés : analyse des termes de {len(jobs)} requête(s) (synonymes MeSH)…")
+
+        def finished(*_):
+            txt = bytes(proc.readAll()).decode("utf-8", "replace")
+            try:
+                os.remove(tmp)
+                os.rmdir(tmpd)
+            except OSError:
+                pass
+            self.q_kw.setEnabled(True)
+            m = re.search(r"^KEYWORDS_FILE: (.+)$", txt, re.M)
+            if m and os.path.exists(m.group(1).strip()):
+                n = re.search(r"^(\d+) ligne\(s\)", txt, re.M)
+                warn = re.search(r"^⚠ (\d+) requête", txt, re.M)
+                self.q_status.setText(f"Mots-clés enregistrés : {os.path.basename(out)}"
+                                      + (f" ({n.group(1)} lignes de termes équivalents)" if n else "")
+                                      + (f" — {warn.group(1)} interrogation(s) MeSH sans réponse : synonymes "
+                                         "incomplets." if warn else "."))
+                self._open_path(m.group(1).strip())
+            else:
+                self.q_status.setText("Mots-clés : échec — " + (txt.strip().splitlines() or ["pas de réponse"])[-1][:200])
+            proc.deleteLater()
+            self._kw_proc = None
+        proc.finished.connect(finished)
+        proc.errorOccurred.connect(lambda e: e == QProcess.FailedToStart and finished())
+        proc.start(prog, full)
 
     # ------------------------------------------------ évaluation (sans téléchargement)
     def _eval_run(self, query, mx, sort, done):
@@ -2915,7 +3003,8 @@ class MainWindow(QMainWindow):
             cells = [self.STATUS.get(job["status"], job["status"]), job["stem"] + ".xlsx",
                      (job.get("base_query") or "(filtres seuls)") + filt,
                      f'{self.SORTS.get(job["sort"], job["sort"])} / {job["max"]}'
-                     + ("" if job["getpdf"] else " / sans PDF") + (" / JSON" if job.get("getjson") else ""),
+                     + ("" if job["getpdf"] else " / sans PDF") + (" / JSON" if job.get("getjson") else "")
+                     + (" / Gemini" if job.get("json2pdf") else "") + (" / IA locale" if job.get("getjats") else ""),
                      eval_short(job.get("eval")), job.get("summary", "")]
             for c, text in enumerate(cells):
                 it = QTableWidgetItem(text)
@@ -3077,6 +3166,8 @@ class MainWindow(QMainWindow):
         self.passes.setValue(job["passes"])
         self.getpdf.setChecked(job["getpdf"])
         self.getjson.setChecked(bool(job.get("getjson")))
+        self.json2pdf.setChecked(bool(job.get("json2pdf")))
+        self.getjats.setChecked(bool(job.get("getjats")))
         src = job.get("sources")
         for k, cb in self.source_boxes.items():
             cb.setChecked(src is None or k in src)
@@ -4282,7 +4373,8 @@ class MainWindow(QMainWindow):
             else:
                 missing = [f for f in ("--core-key", "--elsevier-key", "--openalex-key", "--import-pdf",
                                        "--time-set", "--getjson", "--sources", "--springer-oa-key",
-                                       "--springer-meta-key", "--identify-pdf", "--evaluate") if f not in flags]
+                                       "--springer-meta-key", "--identify-pdf", "--evaluate", "--getjats",
+                                       "--keywords-from-queries") if f not in flags]
                 txt = f"Version {ver}, prête."
                 if missing:
                     txt += " Options absentes de cette version : " + ", ".join(missing) + "."
@@ -4292,6 +4384,10 @@ class MainWindow(QMainWindow):
             self.getjson.setEnabled("--getjson" in flags)
             if "--getjson" not in flags:
                 self.getjson.setChecked(False)
+            self.getjats.setEnabled("--getjats" in flags)
+            if "--getjats" not in flags:
+                self.getjats.setChecked(False)
+            self.q_kw.setEnabled("--keywords-from-queries" in flags)
             self.sources_sec.setEnabled("--sources" in flags)
             self.k_els_tok.setEnabled("--elsevier-insttoken" in flags)
             self.k_core.setEnabled("--core-key" in flags)
@@ -4401,6 +4497,7 @@ class MainWindow(QMainWindow):
                 "sort": self._sort_key(), "getpdf": self.getpdf.isChecked(),
                 "getjson": self.getjson.isChecked() and self.getjson.isEnabled(),
                 "json2pdf": self.json2pdf.isChecked() and self.json2pdf.isEnabled(),
+                "getjats": self.getjats.isChecked() and self.getjats.isEnabled(),
                 "sources": self._selected_sources() if self.sources_sec.isEnabled() else None,
                 "passes": self.passes.value(), "status": "attente", "summary": ""}
 
@@ -4418,6 +4515,8 @@ class MainWindow(QMainWindow):
                 args += ["--pass-number", str(job["passes"])]
         if job.get("getjson"):
             args.append("--getjson")
+        if job.get("getjats"):
+            args.append("--getjats")
         src = job.get("sources")
         if src is not None and set(src) != {k for k, _, _ in SOURCES}:
             args += ["--sources", ",".join(src) if src else "none"]
@@ -4599,6 +4698,11 @@ class MainWindow(QMainWindow):
                 self.s_json.set(self._json_ok)
                 kind = "json"
             self.phase.setText(f"Passe JSON : article {i} sur {n}")
+        m = re.match(r"\s*\[(\d+)/(\d+)\] PMID \d+ ◆ (.*)$", line)
+        if m:   # passe XML JATS
+            if m.group(3).startswith("XML"):
+                kind = "json"
+            self.phase.setText(f"Passe XML JATS (IA locale) : article {m.group(1)} sur {m.group(2)}")
         m = re.match(r"\s*\[(\d+)/(\d+)\] PMID \d+ .*→ (.*)$", line)
         if m:
             i, n, res = int(m.group(1)), int(m.group(2)), m.group(3)
@@ -4758,6 +4862,7 @@ class MainWindow(QMainWindow):
         self.getjson.setChecked(bool(s.get("getjson", False)))
         self.json2pdf.setEnabled(self.getjson.isChecked())
         self.json2pdf.setChecked(bool(s.get("json2pdf", False)))
+        self.getjats.setChecked(bool(s.get("getjats", False)))
         src = s.get("sources")
         for k, cb in self.source_boxes.items():
             cb.setChecked(not isinstance(src, list) or k in src)
@@ -4807,6 +4912,7 @@ class MainWindow(QMainWindow):
             "getpdf": self.getpdf.isChecked(),
             "getjson": self.getjson.isChecked(),
             "json2pdf": self.json2pdf.isChecked(),
+            "getjats": self.getjats.isChecked(),
             "sources": self._selected_sources(),
             "log_bg": getattr(self, "log_bg", LOG_THEMES["nuit"][1]),
             "sort": self._sort_key(),
