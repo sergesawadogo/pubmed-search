@@ -80,7 +80,7 @@ try:  # optionnel : lecture du texte des PDF (--import-pdf, contrôle API Elsevi
 except ImportError:
     PdfReader = None
 
-VERSION = "1.10.0"
+VERSION = "1.10.1"
 TOOL_NAME = "pubmed_search_py"
 DEFAULT_EMAIL = "sergesawadogo@gmail.com"
 
@@ -433,12 +433,33 @@ class Article:
 # --------------------------------------------------------------------------- #
 # PubMed : ESearch / EFetch / ELink
 # --------------------------------------------------------------------------- #
+# erreurs passagères du moteur de recherche NCBI (renvoyées avec un HTTP 200)
+NCBI_TRANSIENT = ("backend failed", "database is not supported", "temporarily", "unavailable",
+                  "timeout", "try again", "internal error", "cannot process")
+
+
 def esearch(http, term, sort, retmax):
     data = http.ncbi(db="pubmed", term=term, sort=sort, retmax=retmax, retmode="json")
-    r = http.request("POST", EUTILS + "esearch.fcgi", "ncbi", data=data)
-    r.raise_for_status()
-    j = r.json().get("esearchresult", {})
+    waits = (10, 30, 60, 120)
+    for attempt in range(len(waits) + 1):
+        r = http.request("POST", EUTILS + "esearch.fcgi", "ncbi", data=data)
+        r.raise_for_status()
+        try:
+            j = r.json().get("esearchresult", {})
+        except ValueError:
+            j = {"ERROR": "réponse illisible (backend NCBI)"}
+        err = str(j.get("ERROR", ""))
+        if err and any(k in err.lower() for k in NCBI_TRANSIENT) and attempt < len(waits) and not STOP.is_set():
+            log(f"  ⏳ PubMed ne répond pas correctement ({err[:90]}) : panne passagère des serveurs NCBI, "
+                f"nouvel essai dans {waits[attempt]} s ({attempt + 1}/{len(waits)})…")
+            time.sleep(waits[attempt])
+            continue
+        break
     if "ERROR" in j:
+        if any(k in str(j["ERROR"]).lower() for k in NCBI_TRANSIENT):
+            raise RuntimeError(f"ESearch : {j['ERROR']} — panne des serveurs NCBI qui dure depuis près de "
+                               "4 min : relancez la recherche plus tard. Si l'erreur persiste, testez la même "
+                               "requête sur pubmed.ncbi.nlm.nih.gov.")
         raise RuntimeError(f"ESearch : {j['ERROR']}")
     warn = j.get("warninglist") or {}
     for k in ("phrasesignored", "quotedphrasesnotfound", "outputmessages"):
@@ -3462,9 +3483,17 @@ def _esearch_raw(http, term, sort="relevance", retmax=0, webenv=None, query_key=
     data = http.ncbi(db="pubmed", term=term, sort=sort, retmax=retmax, retmode="json")
     if webenv:
         data.update(WebEnv=webenv, usehistory="y")
-    r = http.request("POST", EUTILS + "esearch.fcgi", "ncbi", data=data)
-    r.raise_for_status()
-    j = r.json().get("esearchresult", {})
+    for wait in (5, 15, 30, 0):
+        r = http.request("POST", EUTILS + "esearch.fcgi", "ncbi", data=data)
+        r.raise_for_status()
+        try:
+            j = r.json().get("esearchresult", {})
+        except ValueError:
+            j = {"ERROR": "réponse illisible (backend NCBI)"}
+        err = str(j.get("ERROR", "")).lower()
+        if not (err and wait and any(k in err for k in NCBI_TRANSIENT)):
+            break
+        time.sleep(wait)
     if "ERROR" in j:
         raise RuntimeError(f"PubMed : {j['ERROR']}")
     return j

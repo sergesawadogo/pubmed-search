@@ -20,7 +20,7 @@ import threading
 
 APP_NAME = "PubMed Search"
 APP_ID = "pubmed-search-gui"
-APP_VERSION = "1.9.0"
+APP_VERSION = "1.9.1"
 
 
 # --------------------------------------------------------------------------- #
@@ -2556,12 +2556,18 @@ class MainWindow(QMainWindow):
                                "place dans la file. Impossible pendant qu'elle est en cours.")
         self.q_del = QPushButton("Retirer")
         self.q_clear = QPushButton("Retirer les terminées")
+        self.q_retry = QPushButton("Relancer les échecs")
+        self.q_retry.setToolTip("Remet « En attente » les recherches en erreur ou arrêtées (la sélectionnée "
+                                "seule si elle est en échec), puis cliquez sur « Lancer la file »")
+        self.q_retry.clicked.connect(self._queue_retry)
         for i, b in enumerate((self.q_up, self.q_down, self.q_del)):
             b.setObjectName("secondary")
             row.addWidget(b, 0, i)
         for i, b in enumerate((self.q_edit, self.q_clear)):
             b.setObjectName("secondary")
             row.addWidget(b, 1, i * 2, 1, 2 if i == 0 else 1)
+        self.q_retry.setObjectName("secondary")
+        row.addWidget(self.q_retry, 2, 0, 1, 2)
         row.setColumnStretch(3, 1)
         self.q_up.clicked.connect(lambda: self._queue_move(-1))
         self.q_down.clicked.connect(lambda: self._queue_move(1))
@@ -3037,8 +3043,23 @@ class MainWindow(QMainWindow):
         self.q_del.setEnabled(movable)
         self.q_edit.setEnabled(movable)
         self.q_clear.setEnabled(any(j["status"] in ("ok", "arret", "erreur") for j in self.queue))
+        self.q_retry.setEnabled(any(j["status"] in ("arret", "erreur") for j in self.queue))
         n_wait = sum(1 for j in self.queue if j["status"] == "attente")
         self.q_run.setEnabled(n_wait > 0 and not self.queue_active and self.proc is None)
+
+    def _queue_retry(self):
+        r = self._queue_sel()
+        if r >= 0 and self.queue[r]["status"] in ("arret", "erreur"):
+            jobs = [self.queue[r]]
+        else:
+            jobs = [j for j in self.queue if j["status"] in ("arret", "erreur")]
+        for j in jobs:
+            j["status"] = "attente"
+            j["summary"] = ""
+        self._queue_refresh()
+        self._queue_buttons()
+        self._save_settings()
+        self.q_status.setText(f"{len(jobs)} recherche(s) remise(s) en attente : cliquez sur « Lancer la file ».")
 
     def _end_edit(self):
         self.editing_job = None
